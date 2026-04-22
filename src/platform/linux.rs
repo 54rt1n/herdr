@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn clipboard_commands_prefer_wayland_when_available() {
-        let _env_lock = env_lock();
+        let _lock = env_lock();
         let _wayland = EnvVarGuard::set("WAYLAND_DISPLAY", "wayland-0");
         let _display = EnvVarGuard::remove("DISPLAY");
         let commands = clipboard_commands();
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn clipboard_commands_include_x11_fallbacks() {
-        let _env_lock = env_lock();
+        let _lock = env_lock();
         let _wayland = EnvVarGuard::remove("WAYLAND_DISPLAY");
         let _display = EnvVarGuard::set("DISPLAY", ":0");
         let commands = clipboard_commands();
