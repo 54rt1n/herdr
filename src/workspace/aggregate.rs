@@ -169,9 +169,8 @@ mod tests {
         assert!(details.iter().any(|detail| detail.label == "main·pi"));
         assert!(details.iter().any(|detail| detail.label == "logs·claude"));
     }
-
     #[test]
-    fn pane_details_include_hook_reported_unknown_agents() {
+    fn pane_details_include_hook_reported_hermes_agent() {
         let mut ws = Workspace::test_new("test");
         let root_pane = ws.tabs[0].root_pane;
         ws.tabs[0]
@@ -188,6 +187,6 @@ mod tests {
         let details = ws.pane_details();
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].agent_label, "hermes");
-        assert_eq!(details[0].agent, None);
+        assert_eq!(details[0].agent, Some(Agent::Hermes));
     }
 }

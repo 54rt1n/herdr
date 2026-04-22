@@ -501,6 +501,7 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detect::{Agent, AgentState};
 
     #[test]
     fn workspace_identity_follows_first_tab_root_pane_cwd() {
@@ -533,5 +534,47 @@ mod tests {
         assert!(ws.tabs[2].custom_name.is_none());
         assert_eq!(ws.tabs[2].root_pane, moved_root);
         assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
+    }
+
+    #[test]
+    fn pane_details_include_tab_context_when_workspace_has_multiple_tabs() {
+        let mut ws = Workspace::test_new("test");
+        ws.tabs[0].set_custom_name("main".into());
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0].panes.get_mut(&root_pane).unwrap().detected_agent = Some(Agent::Pi);
+
+        let tab_idx = ws.test_add_tab(Some("logs"));
+        let second_root_pane = ws.tabs[tab_idx].root_pane;
+        ws.tabs[tab_idx]
+            .panes
+            .get_mut(&second_root_pane)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 2);
+        assert!(details.iter().any(|detail| detail.label == "main·pi"));
+        assert!(details.iter().any(|detail| detail.label == "logs·claude"));
+    }
+
+    #[test]
+    fn pane_details_include_hook_reported_hermes_agent() {
+        let mut ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        ws.tabs[0]
+            .panes
+            .get_mut(&root_pane)
+            .unwrap()
+            .set_hook_authority(
+                "custom:hermes".into(),
+                "hermes".into(),
+                AgentState::Working,
+                None,
+            );
+
+        let details = ws.pane_details();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].agent_label, "hermes");
+        assert_eq!(details[0].agent, Some(Agent::Hermes));
     }
 }
