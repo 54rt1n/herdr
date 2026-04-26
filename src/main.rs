@@ -5,7 +5,6 @@ use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use tracing::info;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
 pub(crate) const HERDR_ENV_VALUE: &str = "1";
@@ -39,6 +38,7 @@ mod release_notes;
 mod selection;
 mod server;
 mod sound;
+mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
@@ -83,6 +83,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
 # detach = ""             # optional explicit detach shortcut in server/client mode
+# reload_config = ""      # optional shortcut to reload config.toml without restarting
 # new_tab = "c"
 # rename_tab = ""         # optional, unset by default
 # previous_tab = ""       # optional, unset by default
@@ -110,9 +111,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
-# Optional visual toast notifications for background workspace events
+# Background notification popup delivery
 [ui.toast]
-# enabled = false
+# off = disable pop-up notifications
+# herdr = show top-right in-app toasts
+# terminal = ask the outer terminal to show a desktop notification
+# delivery = "off"
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]
@@ -187,6 +191,7 @@ fn main() -> io::Result<()> {
         println!("Usage: herdr [options]");
         println!("       herdr update");
         println!("       herdr server stop");
+        println!("       herdr server reload-config");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
@@ -196,6 +201,7 @@ fn main() -> io::Result<()> {
         println!("Commands:");
         println!("  server              Run as headless server (no terminal, persists after client disconnect)");
         println!("  server stop         Stop the running server via the API socket");
+        println!("  server reload-config  Reload config.toml in the running server");
         println!("  client             Connect to a running server as a thin client");
         println!(
             "  update              Download and install the latest version (run outside herdr)"
@@ -214,10 +220,7 @@ fn main() -> io::Result<()> {
         println!("  --help, -h          Show this help");
         println!();
         println!("Config: {}", config::config_path().display());
-        println!(
-            "Logs:   {}",
-            config::config_dir().join("herdr.log").display()
-        );
+        println!("Logs:   {}", logging::help_log_paths_summary());
         println!("Env:    HERDR_CONFIG_PATH overrides config file path");
         println!("Home:   https://herdr.dev");
         return Ok(());
@@ -281,7 +284,6 @@ fn main() -> io::Result<()> {
     // Auto-detect launch: when --no-session is NOT set, use server/client mode.
     // Check if a server is running, spawn one if needed, then attach as client.
     if !no_session {
-        init_logging();
         return server::autodetect::auto_detect_launch();
     }
 
@@ -323,18 +325,8 @@ fn main() -> io::Result<()> {
     }));
 
     let config = &loaded_config.config;
-    let config_diagnostic = if loaded_config.diagnostics.is_empty() {
-        None
-    } else if loaded_config.diagnostics.len() == 1 {
-        Some(loaded_config.diagnostics[0].clone())
-    } else {
-        Some(format!(
-            "{} (and {} more)",
-            loaded_config.diagnostics[0],
-            loaded_config.diagnostics.len() - 1
-        ))
-    };
-    info!("herdr starting (monolithic), pid={}", std::process::id());
+    let config_diagnostic = config::config_diagnostic_summary(&loaded_config.diagnostics);
+    logging::startup("app");
 
     // Background update check (non-blocking, best-effort)
     // Only checks for newer versions and notifies the TUI.
@@ -407,7 +399,7 @@ fn main() -> io::Result<()> {
     // Shut down runtime immediately — kills lingering PTY reader/writer tasks
     rt.shutdown_timeout(std::time::Duration::from_millis(100));
 
-    info!("herdr exiting");
+    logging::shutdown("app");
     result
 }
 

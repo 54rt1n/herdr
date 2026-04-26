@@ -257,6 +257,7 @@ pub fn run_client() -> io::Result<()> {
     let sound_config = loaded_config.config.ui.sound;
 
     let socket_path = client_socket_path();
+    crate::logging::startup("client");
     info!(path = %socket_path.display(), "connecting to server");
 
     // Try to connect to the server.
@@ -318,7 +319,7 @@ pub fn run_client() -> io::Result<()> {
     if let Err(err) = result {
         eprintln!("herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
-        info!("herdr client exiting");
+        crate::logging::shutdown("client");
 
         if matches!(
             err,
@@ -333,7 +334,7 @@ pub fn run_client() -> io::Result<()> {
     }
 
     rt.shutdown_timeout(Duration::from_millis(100));
-    info!("herdr client exiting");
+    crate::logging::shutdown("client");
     Ok(())
 }
 
@@ -524,6 +525,20 @@ fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<(
 // ---------------------------------------------------------------------------
 
 fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
+    handle_notify_with_terminal_notifier(
+        kind,
+        message,
+        sound_config,
+        crate::terminal_notify::show_notification,
+    );
+}
+
+fn handle_notify_with_terminal_notifier(
+    kind: NotifyKind,
+    message: &str,
+    sound_config: &crate::config::SoundConfig,
+    mut show_terminal_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
+) {
     match kind {
         NotifyKind::Sound => {
             let Some(sound) = sound_from_notify_message(message) else {
@@ -539,6 +554,10 @@ fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::
         }
         NotifyKind::Toast => {
             debug!(message = message, "received toast notification from server");
+            let (title, body) = crate::terminal_notify::split_message(message);
+            if let Err(err) = show_terminal_notification(title, body) {
+                warn!(err = %err, "failed to emit terminal notification");
+            }
         }
     }
 }
@@ -725,6 +744,27 @@ mod tests {
     #[test]
     fn sound_from_notify_message_rejects_unknown_payloads() {
         assert_eq!(sound_from_notify_message("toast"), None);
+    }
+
+    #[test]
+    fn toast_notify_from_server_is_emitted_even_when_attach_config_was_off() {
+        let sound_config = crate::config::SoundConfig::default();
+        let mut emitted = None;
+
+        handle_notify_with_terminal_notifier(
+            NotifyKind::Toast,
+            "pi finished: workspace 1",
+            &sound_config,
+            |title, body| {
+                emitted = Some((title.to_string(), body.map(str::to_string)));
+                Ok(true)
+            },
+        );
+
+        assert_eq!(
+            emitted,
+            Some(("pi finished".to_string(), Some("workspace 1".to_string())))
+        );
     }
 
     #[test]

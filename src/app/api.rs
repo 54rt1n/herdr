@@ -47,6 +47,11 @@ impl App {
             None
         };
 
+        let update_ready_version = if let AppEvent::UpdateReady { version } = &ev {
+            Some(version.clone())
+        } else {
+            None
+        };
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
         for update in &pane_updates {
@@ -64,6 +69,58 @@ impl App {
         if let Some(overlay) = overlay_state {
             self.restore_overlay_after_exit(overlay);
         }
+
+        if matches!(
+            self.state.toast_config.delivery,
+            crate::config::ToastDelivery::Terminal
+        ) {
+            if let Some(version) = update_ready_version {
+                let _ = crate::terminal_notify::show_notification(
+                    &format!("v{version} available"),
+                    Some("detach, then run `herdr update`"),
+                );
+            } else {
+                for update in &pane_updates {
+                    let is_active_tab = self
+                        .state
+                        .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+                    let Some(kind) = crate::app::actions::notification_toast_for_state_change(
+                        is_active_tab,
+                        update.previous_state,
+                        update.state,
+                    ) else {
+                        continue;
+                    };
+                    let Some(ws) = self.state.workspaces.get(update.ws_idx) else {
+                        continue;
+                    };
+                    let Some(pane) = ws
+                        .tabs
+                        .iter()
+                        .find_map(|tab| tab.panes.get(&update.pane_id))
+                    else {
+                        continue;
+                    };
+                    let Some(agent_label) = pane.effective_agent_label() else {
+                        continue;
+                    };
+                    let event_text = match kind {
+                        ToastKind::NeedsAttention => "needs attention",
+                        ToastKind::Finished => "finished",
+                        ToastKind::UpdateInstalled => "updated",
+                    };
+                    let _ = crate::terminal_notify::show_notification(
+                        &format!("{} {}", agent_label, event_text),
+                        Some(&crate::app::actions::notification_context(
+                            ws,
+                            update.ws_idx,
+                            update.pane_id,
+                        )),
+                    );
+                }
+            }
+        }
+
         self.sync_toast_deadline(previous_toast);
     }
 
@@ -225,6 +282,16 @@ impl App {
                     result: ResponseResult::Ok {},
                 }
             }
+            Method::ServerReloadConfig(_) => {
+                let report = self.reload_config();
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::ConfigReload {
+                        status: report.status,
+                        diagnostics: report.diagnostics,
+                    },
+                }
+            }
             Method::WorkspaceList(_) => SuccessResponse {
                 id: request.id,
                 result: ResponseResult::WorkspaceList {
@@ -276,6 +343,7 @@ impl App {
                         if let Some(label) = params.label {
                             if let Some(workspace) = self.state.workspaces.get_mut(index) {
                                 workspace.set_custom_name(label);
+                                crate::logging::workspace_renamed(&workspace.id);
                             }
                         }
                         let workspace = self.workspace_info(index);
@@ -371,6 +439,7 @@ impl App {
                     .unwrap();
                 };
                 ws.set_custom_name(params.label.clone());
+                crate::logging::workspace_renamed(&ws.id);
                 self.schedule_session_save();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::WorkspaceRenamed,
@@ -547,6 +616,10 @@ impl App {
                 match result {
                     Ok(tab_idx) => {
                         if let Some(label) = label {
+                            let workspace_id = self.state.workspaces[ws_idx].id.clone();
+                            let tab_id = self
+                                .public_tab_id(ws_idx, tab_idx)
+                                .unwrap_or_else(|| format!("{}:{}", workspace_id, tab_idx + 1));
                             if let Some(tab) = self
                                 .state
                                 .workspaces
@@ -554,6 +627,7 @@ impl App {
                                 .and_then(|ws| ws.tabs.get_mut(tab_idx))
                             {
                                 tab.set_custom_name(label);
+                                crate::logging::tab_renamed(&workspace_id, &tab_id);
                             }
                         }
                         if focus {
@@ -625,6 +699,10 @@ impl App {
                     })
                     .unwrap();
                 };
+                let workspace_id = self.state.workspaces[ws_idx].id.clone();
+                let tab_id = self
+                    .public_tab_id(ws_idx, tab_idx)
+                    .unwrap_or_else(|| format!("{}:{}", workspace_id, tab_idx + 1));
                 let Some(tab) = self
                     .state
                     .workspaces
@@ -641,6 +719,7 @@ impl App {
                     .unwrap();
                 };
                 tab.set_custom_name(params.label.clone());
+                crate::logging::tab_renamed(&workspace_id, &tab_id);
                 self.schedule_session_save();
                 self.emit_event(crate::api::schema::EventEnvelope {
                     event: crate::api::schema::EventKind::TabRenamed,
@@ -1180,6 +1259,7 @@ impl App {
                         });
                         match path {
                             Ok(path) => {
+                                crate::logging::integration_action("install", "pi", "ok");
                                 vec![format!("installed pi integration to {}", path.display())]
                             }
                             Err(response) => return response,
@@ -1197,16 +1277,19 @@ impl App {
                             .unwrap()
                         });
                         match installed {
-                            Ok(installed) => vec![
-                                format!(
-                                    "installed claude integration hook to {}",
-                                    installed.hook_path.display()
-                                ),
-                                format!(
-                                    "ensured claude settings at {}",
-                                    installed.settings_path.display()
-                                ),
-                            ],
+                            Ok(installed) => {
+                                crate::logging::integration_action("install", "claude", "ok");
+                                vec![
+                                    format!(
+                                        "installed claude integration hook to {}",
+                                        installed.hook_path.display()
+                                    ),
+                                    format!(
+                                        "ensured claude settings at {}",
+                                        installed.settings_path.display()
+                                    ),
+                                ]
+                            }
                             Err(response) => return response,
                         }
                     }
@@ -1222,20 +1305,23 @@ impl App {
                             .unwrap()
                         });
                         match installed {
-                            Ok(installed) => vec![
-                                format!(
-                                    "installed codex integration hook to {}",
-                                    installed.hook_path.display()
-                                ),
-                                format!(
-                                    "ensured codex hooks at {}",
-                                    installed.hooks_path.display()
-                                ),
-                                format!(
-                                    "ensured codex config at {}",
-                                    installed.config_path.display()
-                                ),
-                            ],
+                            Ok(installed) => {
+                                crate::logging::integration_action("install", "codex", "ok");
+                                vec![
+                                    format!(
+                                        "installed codex integration hook to {}",
+                                        installed.hook_path.display()
+                                    ),
+                                    format!(
+                                        "ensured codex hooks at {}",
+                                        installed.hooks_path.display()
+                                    ),
+                                    format!(
+                                        "ensured codex config at {}",
+                                        installed.config_path.display()
+                                    ),
+                                ]
+                            }
                             Err(response) => return response,
                         }
                     }
@@ -1251,10 +1337,13 @@ impl App {
                             .unwrap()
                         });
                         match installed {
-                            Ok(installed) => vec![format!(
-                                "installed opencode integration plugin to {}",
-                                installed.plugin_path.display()
-                            )],
+                            Ok(installed) => {
+                                crate::logging::integration_action("install", "opencode", "ok");
+                                vec![format!(
+                                    "installed opencode integration plugin to {}",
+                                    installed.plugin_path.display()
+                                )]
+                            }
                             Err(response) => return response,
                         }
                     }
@@ -1284,6 +1373,7 @@ impl App {
                         });
                         match result {
                             Ok(result) => {
+                                crate::logging::integration_action("uninstall", "pi", "ok");
                                 if result.removed_extension {
                                     vec![format!(
                                         "removed pi integration extension at {}",
@@ -1312,6 +1402,7 @@ impl App {
                         });
                         match result {
                             Ok(result) => {
+                                crate::logging::integration_action("uninstall", "claude", "ok");
                                 let mut messages = Vec::new();
                                 if result.removed_hook_file {
                                     messages.push(format!(
@@ -1353,6 +1444,7 @@ impl App {
                         });
                         match result {
                             Ok(result) => {
+                                crate::logging::integration_action("uninstall", "codex", "ok");
                                 let mut messages = Vec::new();
                                 if result.removed_hook_file {
                                     messages.push(format!(
@@ -1398,6 +1490,7 @@ impl App {
                         });
                         match result {
                             Ok(result) => {
+                                crate::logging::integration_action("uninstall", "opencode", "ok");
                                 if result.removed_plugin {
                                     vec![format!(
                                         "removed opencode integration plugin at {}",

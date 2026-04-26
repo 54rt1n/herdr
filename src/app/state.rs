@@ -1,4 +1,4 @@
-use crate::config::{Keybinds, SoundConfig, ToastConfig};
+use crate::config::{Keybinds, SoundConfig, ToastConfig, ToastDelivery};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
@@ -593,7 +593,7 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
-    pub request_reload_keybinds: bool,
+    pub request_reload_config: bool,
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
@@ -602,8 +602,6 @@ pub struct AppState {
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
-    pub onboarding_step: usize,
-    pub onboarding_list: SelectionListState,
     pub release_notes: Option<ReleaseNotesState>,
     pub keybind_help: KeybindHelpState,
     pub workspace_scroll: usize,
@@ -638,6 +636,7 @@ pub struct AppState {
     #[allow(dead_code)] // kept for backward compat; palette.accent is the source of truth
     pub accent: Color,
     pub sound: SoundConfig,
+    pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
     pub keybinds: Keybinds,
     /// Frame counter for spinner animations (wraps around).
@@ -663,6 +662,10 @@ impl AppState {
 
     pub fn sound_enabled(&self) -> bool {
         self.sound.enabled
+    }
+
+    pub fn toast_delivery(&self) -> ToastDelivery {
+        self.toast_config.delivery
     }
 
     pub fn is_prefix(&self, key: &crossterm::event::KeyEvent) -> bool {
@@ -715,15 +718,13 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
-            request_reload_keybinds: false,
+            request_reload_config: false,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
-            onboarding_step: 0,
-            onboarding_list: SelectionListState::new(1),
             release_notes: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             workspace_scroll: 0,
@@ -767,6 +768,7 @@ impl AppState {
                 enabled: false,
                 ..SoundConfig::default()
             },
+            local_sound_playback: false,
             toast_config: ToastConfig::default(),
             keybinds: Keybinds {
                 new_workspace: (KeyCode::Char('n'), KeyModifiers::empty()),
@@ -777,6 +779,8 @@ impl AppState {
                 close_workspace_label: "shift+d".into(),
                 detach: None,
                 detach_label: None,
+                reload_config: None,
+                reload_config_label: None,
                 previous_workspace: None,
                 previous_workspace_label: None,
                 next_workspace: None,
