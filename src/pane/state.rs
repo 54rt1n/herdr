@@ -168,6 +168,7 @@ pub(crate) fn stabilize_agent_state(
     raw: AgentState,
     now: std::time::Instant,
     last_working_at: &mut Option<std::time::Instant>,
+    screen_changed: bool,
 ) -> AgentState {
     let hold = match agent {
         Some(Agent::Claude) => Some(CLAUDE_WORKING_HOLD),
@@ -185,6 +186,11 @@ pub(crate) fn stabilize_agent_state(
         }
         AgentState::Blocked => AgentState::Blocked,
         AgentState::Idle if previous == AgentState::Working => {
+            if screen_changed {
+                *last_working_at = Some(now);
+                return AgentState::Working;
+            }
+
             if last_working_at.is_some_and(|last_working| now.duration_since(last_working) < hold) {
                 AgentState::Working
             } else {
@@ -210,6 +216,7 @@ mod tests {
             AgentState::Working,
             now,
             &mut last_working,
+            false,
         );
         assert_eq!(working, AgentState::Working);
 
@@ -219,6 +226,7 @@ mod tests {
             AgentState::Idle,
             now + std::time::Duration::from_millis(400),
             &mut last_working,
+            false,
         );
         assert_eq!(still_working, AgentState::Working);
     }
@@ -234,6 +242,7 @@ mod tests {
             AgentState::Idle,
             now + CLAUDE_WORKING_HOLD + std::time::Duration::from_millis(1),
             &mut last_working,
+            false,
         );
         assert_eq!(state, AgentState::Idle);
     }
@@ -249,6 +258,7 @@ mod tests {
             AgentState::Working,
             now,
             &mut last_working,
+            false,
         );
         assert_eq!(working, AgentState::Working);
 
@@ -258,6 +268,7 @@ mod tests {
             AgentState::Idle,
             now + std::time::Duration::from_millis(250),
             &mut last_working,
+            false,
         );
         assert_eq!(still_working, AgentState::Working);
     }
@@ -273,8 +284,58 @@ mod tests {
             AgentState::Idle,
             now + HERMES_WORKING_HOLD + std::time::Duration::from_millis(1),
             &mut last_working,
+            false,
         );
         assert_eq!(state, AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_stays_working_when_screen_changes_after_hold() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+
+        let state = stabilize_agent_state(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            AgentState::Idle,
+            now + HERMES_WORKING_HOLD + std::time::Duration::from_millis(1),
+            &mut last_working,
+            true,
+        );
+
+        assert_eq!(state, AgentState::Working);
+        assert_eq!(
+            last_working,
+            Some(now + HERMES_WORKING_HOLD + std::time::Duration::from_millis(1))
+        );
+    }
+
+    #[test]
+    fn hermes_transitions_to_idle_after_hold_when_screen_stops_changing() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+
+        let still_working = stabilize_agent_state(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            AgentState::Idle,
+            now + HERMES_WORKING_HOLD + std::time::Duration::from_millis(1),
+            &mut last_working,
+            true,
+        );
+        assert_eq!(still_working, AgentState::Working);
+
+        let stopped = last_working.unwrap();
+        let idle = stabilize_agent_state(
+            Some(Agent::Hermes),
+            AgentState::Working,
+            AgentState::Idle,
+            stopped + HERMES_WORKING_HOLD + std::time::Duration::from_millis(1),
+            &mut last_working,
+            false,
+        );
+
+        assert_eq!(idle, AgentState::Idle);
     }
 
     #[test]
@@ -288,6 +349,7 @@ mod tests {
             AgentState::Idle,
             now,
             &mut last_working,
+            false,
         );
         assert_eq!(state, AgentState::Idle);
     }

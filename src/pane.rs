@@ -442,7 +442,8 @@ impl PaneRuntime {
                 let mut agent_presence = AgentDetectionPresence::from_agent(None);
                 let mut state = AgentState::Unknown;
                 let mut last_process_check = Instant::now();
-                let mut last_claude_working_at = None;
+                let mut last_observed_working_at = None;
+                let mut last_detection_text = String::new();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -462,7 +463,8 @@ impl PaneRuntime {
                         _ = detect_reset.notified() => {
                             agent_presence = AgentDetectionPresence::from_agent(None);
                             state = AgentState::Unknown;
-                            last_claude_working_at = None;
+                            last_observed_working_at = None;
+                            last_detection_text.clear();
                         }
                     }
 
@@ -535,14 +537,17 @@ impl PaneRuntime {
                     }
 
                     let content = terminal.detection_text();
+                    let screen_changed = content != last_detection_text;
                     let raw_state = detect::detect_state(agent, &content);
                     let new_state = stabilize_agent_state(
                         agent,
                         state,
                         raw_state,
                         now,
-                        &mut last_claude_working_at,
+                        &mut last_observed_working_at,
+                        screen_changed,
                     );
+                    last_detection_text = content;
 
                     if new_state != state || agent_changed {
                         debug!(
