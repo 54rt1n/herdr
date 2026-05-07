@@ -7,10 +7,11 @@ use serde::Serialize;
 use crate::api;
 use crate::api::schema::{
     AgentStatus, EmptyParams, IntegrationTarget, Method, OutputMatch, PaneListParams,
-    PaneReadParams, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams,
-    PaneTarget, PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection,
-    Subscription, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
-    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
+    PaneReadParams, PaneReadRegion, PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams,
+    PaneSplitParams, PaneTarget, PaneTargetedReadParams, PaneTargetedReadTarget,
+    PaneWaitForOutputParams, PingParams, ReadSource, Request, SplitDirection, Subscription,
+    TabCreateParams, TabListParams, TabRenameParams, TabTarget, WorkspaceCreateParams,
+    WorkspaceRenameParams, WorkspaceTarget,
 };
 
 pub enum CommandOutcome {
@@ -274,6 +275,7 @@ fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "list" => pane_list(&args[1..]),
         "get" => pane_get(&args[1..]),
         "read" => pane_read(&args[1..]),
+        "targeted-read" => pane_targeted_read(&args[1..]),
         "split" => pane_split(&args[1..]),
         "close" => pane_close(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
@@ -841,6 +843,112 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+fn pane_targeted_read(args: &[String]) -> std::io::Result<i32> {
+    let Some(raw_pane_id) = args.first() else {
+        eprintln!("usage: herdr pane targeted-read <pane_id> --left N|--right N|--width N --top N|--bottom N|--height N [--source visible|recent|recent-unwrapped] [--lines N] [--raw] [--trim]");
+        return Ok(2);
+    };
+
+    let pane_id = normalize_pane_id(raw_pane_id);
+    let mut source = ReadSource::Visible;
+    let mut lines = None;
+    let mut strip_ansi = true;
+    let mut trim = false;
+    let mut left = None;
+    let mut right = None;
+    let mut width = None;
+    let mut top = None;
+    let mut bottom = None;
+    let mut height = None;
+
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --source");
+                    return Ok(2);
+                };
+                source = parse_read_source(value)?;
+                index += 2;
+            }
+            "--lines" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --lines");
+                    return Ok(2);
+                };
+                lines = Some(parse_u32_flag("--lines", value)?);
+                index += 2;
+            }
+            "--left" => {
+                left = Some(parse_next_u32(args, index, "--left")?);
+                index += 2;
+            }
+            "--right" => {
+                right = Some(parse_next_u32(args, index, "--right")?);
+                index += 2;
+            }
+            "--width" => {
+                width = Some(parse_next_u32(args, index, "--width")?);
+                index += 2;
+            }
+            "--top" => {
+                top = Some(parse_next_u32(args, index, "--top")?);
+                index += 2;
+            }
+            "--bottom" => {
+                bottom = Some(parse_next_u32(args, index, "--bottom")?);
+                index += 2;
+            }
+            "--height" => {
+                height = Some(parse_next_u32(args, index, "--height")?);
+                index += 2;
+            }
+            "--raw" => {
+                strip_ansi = false;
+                index += 1;
+            }
+            "--trim" => {
+                trim = true;
+                index += 1;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let response = send_request(&Request {
+        id: "cli:pane:targeted-read".into(),
+        method: Method::PaneTargetedRead(PaneTargetedReadParams {
+            pane_id,
+            target: PaneTargetedReadTarget::Region(PaneReadRegion {
+                left,
+                right,
+                width,
+                top,
+                bottom,
+                height,
+            }),
+            source,
+            lines,
+            strip_ansi,
+            trim,
+        }),
+    })?;
+
+    if let Some(error) = response.get("error") {
+        eprintln!("{}", serde_json::to_string(error).unwrap());
+        return Ok(1);
+    }
+
+    if let Some(text) = response["result"]["read"]["text"].as_str() {
+        print!("{text}");
+    }
+    Ok(0)
+}
+
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!(
@@ -1315,6 +1423,13 @@ fn parse_u32_flag(flag: &str, value: &str) -> std::io::Result<u32> {
         .map_err(|_| std::io::Error::other(format!("invalid value for {flag}: {value}")))
 }
 
+fn parse_next_u32(args: &[String], index: usize, flag: &str) -> std::io::Result<u32> {
+    let Some(value) = args.get(index + 1) else {
+        return Err(std::io::Error::other(format!("missing value for {flag}")));
+    };
+    parse_u32_flag(flag, value)
+}
+
 fn parse_u64_flag(flag: &str, value: &str) -> std::io::Result<u64> {
     value
         .parse::<u64>()
@@ -1427,6 +1542,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane get <pane_id>");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]");
+    eprintln!("  herdr pane targeted-read <pane_id> --left N|--right N|--width N --top N|--bottom N|--height N [--source visible|recent|recent-unwrapped] [--lines N] [--raw] [--trim]");
     eprintln!("  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]");
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");

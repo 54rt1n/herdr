@@ -202,6 +202,7 @@ for backward compatibility, requests also accept the older positional forms like
 | `pane.list` | list panes, optionally filtered by workspace | `pane_list` |
 | `pane.get` | inspect one pane | `pane_info` |
 | `pane.read` | read pane output | `pane_read` |
+| `pane.targeted_read` | read a rectangular pane region | `pane_targeted_read` |
 | `pane.split` | split a pane and create a sibling pane | `pane_info` |
 | `pane.send_text` | send literal text without Enter | `ok` |
 | `pane.send_keys` | send keypresses like `Enter` | `ok` |
@@ -495,7 +496,7 @@ params:
 
 notes:
 
-- `source` is required and must be `visible` or `recent`
+- `source` is required and must be `visible`, `recent`, or `recent_unwrapped`
 - `lines` is optional
 - current implementation defaults to `80` lines when `lines` is omitted and caps reads at `1000`
 - `strip_ansi` defaults to `true`
@@ -504,6 +505,7 @@ notes:
 
 - `visible` — current viewport
 - `recent` — recent scrollback text
+- `recent_unwrapped` — recent scrollback text with soft wraps joined back together
 
 example response:
 
@@ -521,6 +523,124 @@ example response:
       "revision": 0,
       "truncated": false
     }
+  }
+}
+```
+
+### `pane.targeted_read`
+
+params:
+
+```json
+{
+  "pane_id": "1-1",
+  "source": "visible",
+  "target": {
+    "type": "region",
+    "left": 0,
+    "right": 42,
+    "top": 0,
+    "bottom": 0
+  },
+  "strip_ansi": true,
+  "trim": false
+}
+```
+
+region semantics:
+
+- `left` is columns inset from the left edge
+- `right` is columns inset from the right edge
+- `width` is a column count
+- `top` is rows inset from the top edge
+- `bottom` is rows inset from the bottom edge
+- `height` is a row count
+- the x-axis must specify exactly two of `left`, `right`, and `width`
+- the y-axis must specify exactly two of `top`, `bottom`, and `height`
+- `left + right` reads from `left` through the right edge minus `right`
+- `left + width` reads `width` columns starting at `left`
+- `right + width` reads `width` columns ending at the right edge minus `right`
+- `top`, `bottom`, and `height` follow the same rules for rows
+- regions are clamped to the available source bounds
+
+notes:
+
+- `source` accepts `visible`, `recent`, or `recent_unwrapped`
+- `lines` is optional for recent sources and defaults to `80`, capped at `1000`
+- `strip_ansi` defaults to `true`
+- `trim` defaults to `false`
+
+read the entire visible pane except the last 42 columns:
+
+```json
+{
+  "type": "region",
+  "left": 0,
+  "right": 42,
+  "top": 0,
+  "bottom": 0
+}
+```
+
+read the first 80 visible columns:
+
+```json
+{
+  "type": "region",
+  "left": 0,
+  "width": 80,
+  "top": 0,
+  "bottom": 0
+}
+```
+
+read the last 80 visible columns:
+
+```json
+{
+  "type": "region",
+  "right": 0,
+  "width": 80,
+  "top": 0,
+  "bottom": 0
+}
+```
+
+example response:
+
+```json
+{
+  "id": "req_region",
+  "result": {
+    "type": "pane_targeted_read",
+    "read": {
+      "pane_id": "1-1",
+      "workspace_id": "1",
+      "tab_id": "1:1",
+      "source": "visible",
+      "target_type": "region",
+      "region": {
+        "left": 0,
+        "top": 0,
+        "width": 38,
+        "height": 24
+      },
+      "text": "...",
+      "revision": 0,
+      "truncated": false
+    }
+  }
+}
+```
+
+invalid region requests return:
+
+```json
+{
+  "id": "req_region",
+  "error": {
+    "code": "invalid_region",
+    "message": "region x-axis must specify exactly two of left, right, and width"
   }
 }
 ```
@@ -942,6 +1062,7 @@ pane commands:
 herdr pane list [--workspace <workspace_id>]
 herdr pane get <pane_id>
 herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]
+herdr pane targeted-read <pane_id> --left N|--right N|--width N --top N|--bottom N|--height N [--source visible|recent|recent-unwrapped] [--lines N] [--raw] [--trim]
 herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]
 herdr pane close <pane_id>
 herdr pane send-text <pane_id> <text>
@@ -972,12 +1093,13 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 - `pane split` focuses the new pane by default; pass `--no-focus` to keep focus on the original pane
 - `pane read` prints **text**, not json
 - `pane read --source recent-unwrapped` returns recent terminal text with soft wraps joined back together
+- `pane targeted-read` prints **text**, not json, and uses the same region field rules as `pane.targeted_read`
 - `pane send-text`, `pane send-keys`, and `pane run` print nothing on success
 - list/get/create/split/wait commands print json on success
 - `pane run` is a convenience wrapper for `pane.send_input` with the command text followed by a real `Enter` keypress
 - `wait agent-status` is a cli convenience built on top of event subscriptions
 - use it when you want the same `done` / `idle` distinction the UI shows
-- `--raw` disables ansi stripping for `pane read` and `wait output`
+- `--raw` disables ansi stripping for `pane read`, `pane targeted-read`, and `wait output`
 - `wait output --source recent` matches against unwrapped recent terminal text by default, so pane width and soft wrapping do not break matches
 
 ### cli examples
@@ -1003,10 +1125,22 @@ inspect another pane's output:
 herdr pane read 1-1 --source recent --lines 80
 ```
 
+read the visible pane except the last 42 columns:
+
+```bash
+herdr pane targeted-read 1-1 --source visible --left 0 --right 42 --top 0 --bottom 0
+```
+
+read the first 80 visible columns:
+
+```bash
+herdr pane targeted-read 1-1 --source visible --left 0 --width 80 --top 0 --bottom 0
+```
+
 ## behavior notes and gotchas
 
 - `pane.send_text` sends literal text only. if you want to execute a command, follow it with `pane.send_keys` and `Enter`, use `pane.send_input` for ordered `text + keypress` input, or use cli `pane run`, which sends the text and then a real Enter key in one request.
-- `pane.read` and `pane.wait_for_output` strip ansi by default.
+- `pane.read`, `pane.targeted_read`, and `pane.wait_for_output` strip ansi by default.
 - `pane.output_matched` subscriptions fire on transitions into a matching state; they do not repeatedly spam the same still-visible match on every poll.
 - closing the socket connection ends the subscription.
 - there is no separate event transport.

@@ -718,6 +718,10 @@ impl PaneRuntime {
         let _ = self.resize_tx.try_send((rows, cols));
     }
 
+    pub fn size(&self) -> (u16, u16) {
+        self.current_size.get()
+    }
+
     /// Scroll up by N lines (into scrollback history).
     pub fn scroll_up(&self, lines: usize) {
         self.terminal.scroll_up(lines);

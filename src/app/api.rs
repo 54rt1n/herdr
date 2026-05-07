@@ -277,8 +277,8 @@ impl App {
 
         use crate::api::schema::{
             ErrorBody, ErrorResponse, IntegrationInstallResult, IntegrationUninstallResult, Method,
-            PaneListParams, PaneReadResult, ReadSource, ResponseResult, SuccessResponse,
-            TabListParams,
+            PaneListParams, PaneReadResult, PaneTargetedReadResult, PaneTargetedReadTarget,
+            PaneTargetedReadTargetType, ReadSource, ResponseResult, SuccessResponse, TabListParams,
         };
 
         let response = match request.method {
@@ -939,12 +939,8 @@ impl App {
                     })
                     .unwrap();
                 };
-                let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
-                let text = match params.source {
-                    ReadSource::Visible => pane.visible_text(),
-                    ReadSource::Recent => pane.recent_text(requested_lines),
-                    ReadSource::RecentUnwrapped => pane.recent_unwrapped_text(requested_lines),
-                };
+                let requested_lines = bounded_read_lines(params.lines, PANE_READ_DEFAULT_LINES);
+                let text = read_pane_source(pane, &params.source, requested_lines);
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::PaneRead {
@@ -953,6 +949,97 @@ impl App {
                             workspace_id,
                             tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                             source: params.source,
+                            text,
+                            revision: 0,
+                            truncated: false,
+                        },
+                    },
+                }
+            }
+            Method::PaneTargetedRead(params) => {
+                let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some((pane, workspace_id)) = self.lookup_runtime(ws_idx, pane_id) else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+                let Some(tab_idx) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.find_tab_index_for_pane(pane_id))
+                else {
+                    return serde_json::to_string(&ErrorResponse {
+                        id: request.id,
+                        error: ErrorBody {
+                            code: "pane_not_found".into(),
+                            message: format!("pane {} not found", params.pane_id),
+                        },
+                    })
+                    .unwrap();
+                };
+
+                let requested_lines =
+                    bounded_read_lines(params.lines, PANE_TARGETED_READ_DEFAULT_LINES);
+                let (rows, cols) = pane.size();
+                let (surface_width, surface_height) = match &params.source {
+                    ReadSource::Visible => (Some(cols as usize), Some(rows as usize)),
+                    ReadSource::Recent | ReadSource::RecentUnwrapped => (None, None),
+                };
+                let mut source_text = read_pane_source(pane, &params.source, requested_lines);
+                if params.strip_ansi {
+                    source_text = crate::api::targeted_read::strip_ansi_sequences(&source_text);
+                }
+
+                let PaneTargetedReadTarget::Region(region_request) = params.target;
+                let (mut text, region) = match crate::api::targeted_read::crop_text_region(
+                    &source_text,
+                    &region_request,
+                    surface_width,
+                    surface_height,
+                ) {
+                    Ok(cropped) => cropped,
+                    Err(message) => {
+                        return serde_json::to_string(&ErrorResponse {
+                            id: request.id,
+                            error: ErrorBody {
+                                code: "invalid_region".into(),
+                                message,
+                            },
+                        })
+                        .unwrap();
+                    }
+                };
+                if params.trim {
+                    text = text.trim().to_string();
+                }
+
+                SuccessResponse {
+                    id: request.id,
+                    result: ResponseResult::PaneTargetedRead {
+                        read: PaneTargetedReadResult {
+                            pane_id: params.pane_id,
+                            workspace_id,
+                            tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
+                            source: params.source,
+                            target_type: PaneTargetedReadTargetType::Region,
+                            region: crate::api::targeted_read::resolved_region_for_response(
+                                &region,
+                            ),
                             text,
                             revision: 0,
                             truncated: false,
@@ -1311,5 +1398,27 @@ impl App {
         };
 
         serde_json::to_string(&response).unwrap()
+    }
+}
+
+const PANE_READ_DEFAULT_LINES: u32 = 80;
+const PANE_TARGETED_READ_DEFAULT_LINES: u32 = 80;
+const PANE_READ_MAX_LINES: u32 = 1000;
+
+fn bounded_read_lines(lines: Option<u32>, default_lines: u32) -> usize {
+    lines.unwrap_or(default_lines).min(PANE_READ_MAX_LINES) as usize
+}
+
+fn read_pane_source(
+    pane: &crate::pane::PaneRuntime,
+    source: &crate::api::schema::ReadSource,
+    requested_lines: usize,
+) -> String {
+    match source {
+        crate::api::schema::ReadSource::Visible => pane.visible_text(),
+        crate::api::schema::ReadSource::Recent => pane.recent_text(requested_lines),
+        crate::api::schema::ReadSource::RecentUnwrapped => {
+            pane.recent_unwrapped_text(requested_lines)
+        }
     }
 }

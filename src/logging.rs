@@ -107,6 +107,7 @@ fn is_routine_api_method(method: &str) -> bool {
         method,
         "pane.get"
             | "pane.read"
+            | "pane.targeted_read"
             | "pane.list"
             | "workspace.list"
             | "tab.list"

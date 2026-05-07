@@ -324,6 +324,56 @@ fn workspace_list_and_create_round_trip() {
     assert_eq!(read["result"]["read"]["tab_id"], active_tab_id);
     assert!(read["result"]["read"]["text"].is_string());
 
+    let visible_region = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "req_8a",
+            "method": "pane.targeted_read",
+            "params": {
+                "pane_id": pane_id.as_str(),
+                "source": "visible",
+                "target": {
+                    "type": "region",
+                    "left": 0,
+                    "right": 42,
+                    "top": 0,
+                    "bottom": 0
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(visible_region["result"]["type"], "pane_targeted_read");
+    assert_eq!(visible_region["result"]["read"]["target_type"], "region");
+    assert!(
+        visible_region["result"]["read"]["region"]["width"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let invalid_region = send_request(
+        &socket_path,
+        &serde_json::json!({
+            "id": "req_8b",
+            "method": "pane.targeted_read",
+            "params": {
+                "pane_id": pane_id.as_str(),
+                "source": "visible",
+                "target": {
+                    "type": "region",
+                    "left": 0,
+                    "right": 0,
+                    "width": 80,
+                    "top": 0,
+                    "bottom": 0
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(invalid_region["error"]["code"], "invalid_region");
+
     let send_text = send_request(
         &socket_path,
         &format!(

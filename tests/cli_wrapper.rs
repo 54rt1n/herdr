@@ -1312,6 +1312,51 @@ fn pane_run_read_and_wait_commands_work() {
     assert!(text.contains("alpha"));
     assert!(text.contains("ready"));
 
+    let targeted = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "targeted-read",
+            "1-1",
+            "--source",
+            "visible",
+            "--left",
+            "0",
+            "--right",
+            "42",
+            "--top",
+            "0",
+            "--bottom",
+            "0",
+        ],
+    );
+    assert!(
+        targeted.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&targeted.stderr)
+    );
+
+    let invalid_targeted = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "targeted-read",
+            "1-1",
+            "--left",
+            "0",
+            "--right",
+            "0",
+            "--width",
+            "80",
+            "--top",
+            "0",
+            "--bottom",
+            "0",
+        ],
+    );
+    assert_eq!(invalid_targeted.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&invalid_targeted.stderr).contains("invalid_region"));
+
     cleanup_spawned_herdr(herdr, base);
 }
 

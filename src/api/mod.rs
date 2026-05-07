@@ -1,4 +1,5 @@
 pub mod schema;
+pub(crate) mod targeted_read;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -335,6 +336,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",
         Method::PaneRead(_) => "pane.read",
+        Method::PaneTargetedRead(_) => "pane.targeted_read",
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",

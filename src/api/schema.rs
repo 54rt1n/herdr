@@ -54,6 +54,8 @@ pub enum Method {
     PaneSendInput(PaneSendInputParams),
     #[serde(rename = "pane.read")]
     PaneRead(PaneReadParams),
+    #[serde(rename = "pane.targeted_read")]
+    PaneTargetedRead(PaneTargetedReadParams),
     #[serde(rename = "pane.report_agent")]
     PaneReportAgent(PaneReportAgentParams),
     #[serde(rename = "pane.clear_agent_authority")]
@@ -189,6 +191,41 @@ pub struct PaneReadParams {
     pub lines: Option<u32>,
     #[serde(default = "default_true")]
     pub strip_ansi: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneTargetedReadParams {
+    pub pane_id: String,
+    pub target: PaneTargetedReadTarget,
+    pub source: ReadSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u32>,
+    #[serde(default = "default_true")]
+    pub strip_ansi: bool,
+    #[serde(default)]
+    pub trim: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaneTargetedReadTarget {
+    Region(PaneReadRegion),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReadRegion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +497,9 @@ pub enum ResponseResult {
     PaneRead {
         read: PaneReadResult,
     },
+    PaneTargetedRead {
+        read: PaneTargetedReadResult,
+    },
     SubscriptionStarted {},
     WaitMatched {
         event: EventEnvelope,
@@ -528,6 +568,33 @@ pub struct PaneReadResult {
     pub workspace_id: String,
     pub tab_id: String,
     pub source: ReadSource,
+    pub text: String,
+    pub revision: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneTargetedReadTargetType {
+    Region,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneResolvedRegion {
+    pub left: u32,
+    pub top: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneTargetedReadResult {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub source: ReadSource,
+    pub target_type: PaneTargetedReadTargetType,
+    pub region: PaneResolvedRegion,
     pub text: String,
     pub revision: u64,
     pub truncated: bool,
@@ -693,6 +760,70 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let restored: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn request_round_trips_for_pane_targeted_read_region() {
+        let request = Request {
+            id: "req_region".into(),
+            method: Method::PaneTargetedRead(PaneTargetedReadParams {
+                pane_id: "1-1".into(),
+                target: PaneTargetedReadTarget::Region(PaneReadRegion {
+                    left: Some(0),
+                    right: Some(42),
+                    width: None,
+                    top: Some(0),
+                    bottom: Some(0),
+                    height: None,
+                }),
+                source: ReadSource::Visible,
+                lines: None,
+                strip_ansi: true,
+                trim: false,
+            }),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let restored: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn pane_targeted_read_defaults_flags() {
+        let json = r#"
+        {
+            "id": "req_region",
+            "method": "pane.targeted_read",
+            "params": {
+                "pane_id": "1-1",
+                "source": "visible",
+                "target": {
+                    "type": "region",
+                    "left": 0,
+                    "width": 80,
+                    "top": 0,
+                    "bottom": 0
+                }
+            }
+        }
+        "#;
+
+        let request: Request = serde_json::from_str(json).unwrap();
+        let Method::PaneTargetedRead(params) = request.method else {
+            panic!("wrong method parsed");
+        };
+        assert!(params.strip_ansi);
+        assert!(!params.trim);
+        assert!(matches!(
+            params.target,
+            PaneTargetedReadTarget::Region(PaneReadRegion {
+                left: Some(0),
+                width: Some(80),
+                top: Some(0),
+                bottom: Some(0),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -933,6 +1064,36 @@ mod tests {
         assert!(json.contains("\"event\":\"pane.output_matched\""));
         let restored: SubscriptionEventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, event);
+    }
+
+    #[test]
+    fn pane_targeted_read_response_round_trips() {
+        let response = SuccessResponse {
+            id: "req_region".into(),
+            result: ResponseResult::PaneTargetedRead {
+                read: PaneTargetedReadResult {
+                    pane_id: "1-1".into(),
+                    workspace_id: "1".into(),
+                    tab_id: "1:1".into(),
+                    source: ReadSource::Visible,
+                    target_type: PaneTargetedReadTargetType::Region,
+                    region: PaneResolvedRegion {
+                        left: 0,
+                        top: 0,
+                        width: 38,
+                        height: 24,
+                    },
+                    text: "payload".into(),
+                    revision: 0,
+                    truncated: false,
+                },
+            },
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"type\":\"pane_targeted_read\""));
+        let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, response);
     }
 
     #[test]
