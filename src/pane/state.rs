@@ -1,7 +1,7 @@
 use crate::detect::{Agent, AgentState};
 
 const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
-const HERMES_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(700);
+const HERMES_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {

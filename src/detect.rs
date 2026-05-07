@@ -474,6 +474,9 @@ fn has_hermes_thinking_spinner(content: &str) -> bool {
         "contemplating",
         "musing",
         "cogitating",
+        // Common typo observed in status-line reports; treat it as the same
+        // active transition instead of briefly dropping to Idle.
+        "cogiating",
         "ruminating",
         "deliberating",
         "mulling",
@@ -488,12 +491,38 @@ fn has_hermes_thinking_spinner(content: &str) -> bool {
     ];
     hermes_recent_lines(content).iter().any(|line| {
         let trimmed = normalize_hermes_status_line(line);
-        THINKING_VERBS.iter().any(|verb| {
-            trimmed.ends_with(&format!("{verb}..."))
-                || trimmed.ends_with(&format!("{verb}…"))
-                || trimmed == *verb
-        })
+        THINKING_VERBS
+            .iter()
+            .any(|verb| hermes_thinking_line_matches(&trimmed, verb))
     })
+}
+
+fn hermes_thinking_line_matches(line: &str, verb: &str) -> bool {
+    if line == verb {
+        return true;
+    }
+
+    let Some(idx) = line.find(verb) else {
+        return false;
+    };
+    let before = line[..idx].trim();
+    let after = line[idx + verb.len()..].trim();
+
+    if !after.starts_with("...") && !after.starts_with('…') {
+        return false;
+    }
+
+    // Keep the looser match scoped to Hermes spinner/status lines.  This covers
+    // face-prefixed lines like "( ° ʖ °) cogitating... (0.4s)" and braille
+    // spinner lines like "⠋ cogitating...", without treating arbitrary prose
+    // that happens to mention "cogitating..." as a live working state.
+    before.is_empty()
+        || before.starts_with('(')
+        || before.starts_with('⟪')
+        || before
+            .chars()
+            .next()
+            .is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
 }
 
 fn has_hermes_tool_spinner(content: &str) -> bool {
@@ -1459,6 +1488,48 @@ mod tests {
             detect_state(Some(Agent::Hermes), screen),
             AgentState::Working
         );
+    }
+
+    #[test]
+    fn hermes_working_when_thinking_spinner_has_elapsed_suffix() {
+        let screen = "( ° ʖ °) cogitating... (0.4s)\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_thinking_spinner_has_braille_prefix() {
+        let screen = "⠋ cogitating...\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_working_when_cogitating_status_is_misspelled() {
+        let screen = "( ° ʖ °) cogiating...\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 2s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn hermes_bottom_border_alone_is_not_end_of_turn() {
+        let screen = "still updating\n╰─────────────────────────";
+        assert_eq!(
+            detect_state(Some(Agent::Hermes), screen),
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn hermes_prose_with_ellipsis_near_prompt_is_not_working() {
+        let screen = "I was cogitating... but now I am done.\n⚕ gpt-5.4 │ ctx -- │ [░░░░░░░░░░] -- │ 0s\n\n────────────────────\n❯ \n────────────────────";
+        assert_eq!(detect_state(Some(Agent::Hermes), screen), AgentState::Idle);
     }
 
     #[test]
