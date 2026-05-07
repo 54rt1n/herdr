@@ -2,11 +2,50 @@
 
 ## Unreleased
 
+### Fixed
+- Agent panel scope now defaults to `all` and is saved to config when changed, so choosing `current` or `all` survives session resets and upgrades.
+
+## [0.5.5] - 2026-05-06
+
+### Added
+- Added a mobile layout for narrow terminals, making it practical to SSH into your machine and run herdr from your phone.
+
+### Fixed
+- Non-ASCII terminal input is no longer dropped when UTF-8 characters arrive split across multiple reads.
+- Native agent detection now clears agents after their foreground process exits and control returns to the shell, preventing stale agent status in the sidebar.
+- Pane contents no longer shift horizontally when scrollback appears, keeping the scrollbar gutter stable.
+
+## [0.5.4] - 2026-05-03
+
+### Fixed
+- Visible active-tab panes that finish while the outer terminal is unfocused are now marked as seen when you return to herdr, preventing stale done/attention indicators.
+- IME candidate windows and mobile SSH cursor tracking now stay anchored to the focused pane during client redraws, including apps that hide the cursor, instead of drifting to sidebar or repaint positions.
+
+## [0.5.3] - 2026-04-30
+
+### Added
+- Added named persistent sessions, so you can keep separate herdr environments for different projects or contexts while sharing the same global config. See the docs for the full session CLI. (#57, thanks @fbettag)
+- Added `herdr status`, `herdr status server`, and `herdr status client` to inspect the local client, running server, protocol compatibility, socket path, and whether a restart is needed.
+
+### Changed
+- Focused panes can now still alert you through terminal notifications when the herdr terminal window is unfocused, so active work does not go quiet just because you switched to another app.
+
+### Fixed
+- Dragging pane split borders now works when the app inside the pane has mouse reporting enabled, including Claude Code no-flicker mode. (#61, thanks @EYH0602)
+- Pressing the prefix key twice now forwards a literal prefix key into the focused pane in client mode again.
+- `herdr integration install` and `herdr integration uninstall` now work without requiring a running herdr server.
+- Pane PTYs now keep their last attached size while detached, preventing detached output from being resized or rewrapped to fallback dimensions.
+
+## [0.5.2] - 2026-04-27
+
 ### Added
 - Config can now be reloaded in the running app/server from the global menu or with `herdr server reload-config`, applying safe live settings without restarting the persistent server.
 
 ### Fixed
 - Persistent server startup now surfaces config diagnostics in attached clients instead of silently hiding parse or validation errors.
+- Pane backgrounds now stay transparent when the host terminal background color is unknown, while explicit terminal cell backgrounds still render correctly.
+- Persistent-session toast and sound notifications now target the foreground attached client instead of firing across every connected client.
+- Claude Code subagent hook events no longer make the parent Claude pane look idle or released when a subagent finishes, and permissioned tool-call completion keeps the pane in the correct working state.
 
 ## [0.5.1] - 2026-04-25
 

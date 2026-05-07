@@ -250,6 +250,28 @@ impl Palette {
         }
     }
 
+    /// Vesper — minimal high-contrast monochrome with peach and mint accents.
+    pub fn vesper() -> Self {
+        Self {
+            accent: Color::Rgb(255, 199, 153),
+            panel_bg: Color::Rgb(26, 26, 26),
+            surface0: Color::Rgb(35, 35, 35),
+            surface1: Color::Rgb(40, 40, 40),
+            surface_dim: Color::Rgb(16, 16, 16),
+            overlay0: Color::Rgb(92, 92, 92),
+            overlay1: Color::Rgb(126, 126, 126),
+            text: Color::Rgb(255, 255, 255),
+            subtext0: Color::Rgb(160, 160, 160),
+            mauve: Color::Rgb(255, 209, 168),
+            green: Color::Rgb(153, 255, 228),
+            yellow: Color::Rgb(255, 199, 153),
+            red: Color::Rgb(255, 128, 128),
+            blue: Color::Rgb(176, 176, 176),
+            teal: Color::Rgb(102, 221, 204),
+            peach: Color::Rgb(255, 199, 153),
+        }
+    }
+
     /// Resolve a theme by name. Returns None for unknown names.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().replace([' ', '_'], "-").as_str() {
@@ -262,6 +284,7 @@ impl Palette {
             "solarized" | "solarized-dark" => Some(Self::solarized()),
             "kanagawa" => Some(Self::kanagawa()),
             "rose-pine" | "rosepine" => Some(Self::rose_pine()),
+            "vesper" => Some(Self::vesper()),
             _ => None,
         }
     }
@@ -329,7 +352,14 @@ pub struct WorkspaceCardArea {
 
 /// Computed view geometry — derived from AppState + terminal size.
 /// Updated before each render, consumed by render and mouse handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewLayout {
+    Desktop,
+    Mobile,
+}
+
 pub struct ViewState {
+    pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
@@ -338,6 +368,8 @@ pub struct ViewState {
     pub tab_scroll_right_hit_area: Rect,
     pub new_tab_hit_area: Rect,
     pub terminal_area: Rect,
+    pub mobile_header_rect: Rect,
+    pub mobile_menu_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
 }
@@ -366,7 +398,7 @@ pub enum AgentPanelScope {
 
 impl Default for AgentPanelScope {
     fn default() -> Self {
-        Self::CurrentWorkspace
+        Self::AllWorkspaces
     }
 }
 
@@ -405,6 +437,7 @@ pub const THEME_NAMES: &[&str] = &[
     "solarized",
     "kanagawa",
     "rose-pine",
+    "vesper",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -618,6 +651,7 @@ pub struct AppState {
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
+    pub mobile_switcher_scroll: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
     pub(crate) drag: Option<DragState>,
@@ -631,6 +665,9 @@ pub struct AppState {
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
+    /// Last reported focus state for the outer terminal hosting herdr.
+    /// None means unsupported or not yet reported, which preserves active-pane suppression.
+    pub outer_terminal_focus: Option<bool>,
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
@@ -743,7 +780,9 @@ impl AppState {
             agent_panel_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
+            mobile_switcher_scroll: 0,
             view: ViewState {
+                layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
@@ -752,6 +791,8 @@ impl AppState {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                mobile_header_rect: Rect::default(),
+                mobile_menu_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },
@@ -765,6 +806,7 @@ impl AppState {
             update_dismissed: false,
             config_diagnostic: None,
             toast: None,
+            outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
             default_sidebar_width: 26,
@@ -773,7 +815,7 @@ impl AppState {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
-            agent_panel_scope: AgentPanelScope::CurrentWorkspace,
+            agent_panel_scope: AgentPanelScope::AllWorkspaces,
             confirm_close: true,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
             accent: Color::Cyan,

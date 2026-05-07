@@ -1,10 +1,10 @@
 {
-  "version": "0.5.1",
-  "notes": "### Added\n- Toast notifications can now be delivered through the outer terminal as desktop notifications. Configure this with `ui.toast.delivery = \"terminal\"`; see `CONFIGURATION.md` for details.\n- Herdr now writes separate capped support logs for app, client, and server modes, making persistent-session issue reports easier to diagnose without unbounded log growth.\n- The bundled opencode plugin now reports question prompts as blocked while waiting for user input, then returns to working or idle when answered or dismissed. Question prompts are also detected by the default terminal-screen heuristics. (#51, thanks @mspiegel31)\n\n### Changed\n- Routine API request traces now log at debug level by default, making normal support logs smaller and easier to read while preserving detailed traces when debug logging is enabled.\n\n### Fixed\n- Pasted text and other reverse-video terminal content now stays readable when pane backgrounds are transparent. (#45, thanks @EYH0602)\n- Panes now advertise a stable `TERM=xterm-256color` and `COLORTERM=truecolor` by default, improving redraw and cursor behavior in shells and remote sessions.\n- Pane scrollbars once again reserve their own rightmost column instead of overlaying terminal content in persistent session mode.\n- Terminal-delivered toast notifications now use the server-approved delivery decision in persistent session mode, so attaching clients do not incorrectly suppress them.\n- In-app toast delivery now stays inside herdr instead of also forwarding a terminal/desktop notification.",
+  "version": "0.5.5",
+  "notes": "### Added\n- Added a mobile layout for narrow terminals, making it practical to SSH into your machine and run herdr from your phone.\n\n### Fixed\n- Non-ASCII terminal input is no longer dropped when UTF-8 characters arrive split across multiple reads.\n- Native agent detection now clears agents after their foreground process exits and control returns to the shell, preventing stale agent status in the sidebar.\n- Pane contents no longer shift horizontally when scrollback appears, keeping the scrollbar gutter stable.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.1/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.1/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.1/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.1/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.5.5/herdr-macos-aarch64"
   }
 }

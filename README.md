@@ -41,7 +41,17 @@ herdr update
 herdr
 ```
 
-by default herdr launches or attaches to a background session server. `ctrl+b q` detaches the client. agents keep running. use `herdr server stop` to stop the server. use `--no-session` for the old single-process mode.
+by default herdr launches or attaches to one background session server. `ctrl+b q` detaches the client. agents keep running. use `herdr server stop` to stop the default server. use `--no-session` for the old single-process mode.
+
+named sessions are runtime/socket namespaces for separate persistent herdr servers. they do not replace workspaces; each named session has its own panes, tabs, workspaces, sockets, and session state while sharing the same global config file.
+
+```bash
+herdr session list
+herdr session attach work
+herdr session attach side-project
+herdr session stop work
+herdr session delete side-project
+```
 
 1. press `n` to create a workspace
 2. run an agent in the root pane
@@ -105,7 +115,7 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 - **tabs** — first-class in the socket api and cli
 - **mouse-native** — click panes, drag borders, select text to copy; not keyboard-only
 - **notifications** — sounds and toasts for background events; tab-aware suppression
-- **9 built-in themes** — catppuccin (default), tokyo night, dracula, nord, gruvbox, one dark, solarized, kanagawa, rosé pine
+- **10 built-in themes** — catppuccin (default), tokyo night, dracula, nord, gruvbox, one dark, solarized, kanagawa, rosé pine, vesper
 - **session persistence** — pane processes survive client detach; sessions restore after full restart
 
 ## agents can use herdr too

@@ -29,6 +29,19 @@ struct SpawnedHerdr {
     child: Box<dyn Child + Send + Sync>,
 }
 
+struct SpawnedServerProcess {
+    child: std::process::Child,
+}
+
+impl Drop for SpawnedServerProcess {
+    fn drop(&mut self) {
+        let pid = self.child.id();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        unregister_spawned_herdr_pid(Some(pid));
+    }
+}
+
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
@@ -69,6 +82,91 @@ fn wait_for_socket(path: &Path, timeout: Duration) {
 
 fn spawn_herdr(config_home: &Path, runtime_dir: &Path, socket_path: &Path) -> SpawnedHerdr {
     spawn_herdr_with_path(config_home, runtime_dir, socket_path, None)
+}
+
+fn app_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    }
+}
+
+fn named_session_socket(config_home: &Path, session: &str) -> PathBuf {
+    config_home
+        .join(app_dir_name())
+        .join("sessions")
+        .join(session)
+        .join("herdr.sock")
+}
+
+fn spawn_named_server(
+    config_home: &Path,
+    runtime_dir: &Path,
+    session: &str,
+) -> SpawnedServerProcess {
+    fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    register_runtime_dir(runtime_dir);
+    fs::write(
+        config_home.join(app_dir_name()).join("config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(["--session", session, "server"])
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let child = command.spawn().unwrap();
+    register_spawned_herdr_pid(Some(child.id()));
+    SpawnedServerProcess { child }
+}
+
+fn run_named_cli(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> std::process::Output {
+    run_named_cli_with_socket_override(config_home, runtime_dir, args, None)
+}
+
+fn run_named_cli_with_socket_override(
+    config_home: &Path,
+    runtime_dir: &Path,
+    args: &[&str],
+    socket_override: Option<&Path>,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command
+        .args(args)
+        .env("XDG_CONFIG_HOME", config_home)
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .env_remove("HERDR_ENV");
+    if let Some(socket_override) = socket_override {
+        command.env("HERDR_SOCKET_PATH", socket_override);
+    } else {
+        command.env_remove("HERDR_SOCKET_PATH");
+    }
+    command.output().unwrap()
+}
+
+fn run_named_cli_json(config_home: &Path, runtime_dir: &Path, args: &[&str]) -> serde_json::Value {
+    let output = run_named_cli(config_home, runtime_dir, args);
+    assert!(
+        output.status.success(),
+        "command failed: herdr {}\nstatus: {:?}\nstderr: {}\nstdout: {}",
+        args.join(" "),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn spawn_herdr_with_path(
@@ -349,13 +447,34 @@ fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> 
 }
 
 #[test]
-fn claude_hook_suppresses_subagent_reports() {
-    let subagent_input = r#"{"hook_event_name":"PermissionRequest","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+fn claude_hook_reports_subagent_working_and_blocked() {
+    let subagent_input = r#"{"hook_event_name":"Notification","agent_id":"agent-abc123","agent_type":"Explore","notification_type":"permission_prompt"}"#;
 
-    assert!(run_claude_hook("working", subagent_input).is_none());
-    assert!(run_claude_hook("blocked", subagent_input).is_none());
-    assert!(run_claude_hook("idle", subagent_input).is_none());
-    assert!(run_claude_hook("release", subagent_input).is_none());
+    let working =
+        run_claude_hook("working", subagent_input).expect("subagent working should report working");
+    assert_eq!(working["method"], "pane.report_agent");
+    assert_eq!(working["params"]["state"], "working");
+
+    let blocked =
+        run_claude_hook("blocked", subagent_input).expect("subagent blocked should report blocked");
+    assert_eq!(blocked["method"], "pane.report_agent");
+    assert_eq!(blocked["params"]["state"], "blocked");
+}
+
+#[test]
+fn claude_hook_converts_subagent_idle_and_release_to_working() {
+    let subagent_input =
+        r#"{"hook_event_name":"SubagentStop","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+
+    let idle = run_claude_hook("idle", subagent_input)
+        .expect("subagent idle should keep parent pane working");
+    assert_eq!(idle["method"], "pane.report_agent");
+    assert_eq!(idle["params"]["state"], "working");
+
+    let release = run_claude_hook("release", subagent_input)
+        .expect("subagent release should keep parent pane working");
+    assert_eq!(release["method"], "pane.report_agent");
+    assert_eq!(release["params"]["state"], "working");
 }
 
 #[test]
@@ -441,7 +560,243 @@ fn pane_run_sends_one_send_input_request_with_enter_key() {
 }
 
 #[test]
-fn integration_commands_honor_socket_override_when_server_is_missing() {
+fn help_commands_exit_successfully() {
+    let help_cases: &[&[&str]] = &[
+        &["-h"],
+        &["--help"],
+        &["status", "-h"],
+        &["server", "-h"],
+        &["workspace", "-h"],
+        &["tab", "-h"],
+        &["pane", "-h"],
+        &["wait", "-h"],
+        &["session", "-h"],
+        &["session", "attach", "-h"],
+        &["integration", "-h"],
+    ];
+
+    for args in help_cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+            .args(*args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "herdr {} failed: status={:?} stdout={} stderr={}",
+            args.join(" "),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn removed_show_changelog_flag_fails_before_nested_guard() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--show-changelog")
+        .env("HERDR_ENV", "1")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown option: --show-changelog"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nested herdr"),
+        "unknown flag should be rejected before nested guard: {stderr}"
+    );
+}
+
+#[test]
+fn named_sessions_use_separate_servers_and_workspace_state() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+
+    let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
+    let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
+
+    wait_for_socket(
+        &named_session_socket(&config_home, "alpha"),
+        Duration::from_secs(5),
+    );
+    wait_for_socket(
+        &named_session_socket(&config_home, "beta"),
+        Duration::from_secs(5),
+    );
+
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "alpha",
+            "workspace",
+            "create",
+            "--label",
+            "alpha-ws",
+            "--no-focus",
+        ],
+    );
+    run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &[
+            "--session",
+            "beta",
+            "workspace",
+            "create",
+            "--label",
+            "beta-ws",
+            "--no-focus",
+        ],
+    );
+
+    let alpha_list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "alpha", "workspace", "list"],
+    );
+    let beta_list = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "workspace", "list"],
+    );
+
+    let alpha_labels: Vec<_> = alpha_list["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    let beta_labels: Vec<_> = beta_list["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(alpha_labels, vec!["alpha-ws"]);
+    assert_eq!(beta_labels, vec!["beta-ws"]);
+
+    let beta_via_explicit_session = run_named_cli_with_socket_override(
+        &config_home,
+        &runtime_dir,
+        &["--session", "beta", "workspace", "list"],
+        Some(&named_session_socket(&config_home, "alpha")),
+    );
+    assert!(
+        beta_via_explicit_session.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&beta_via_explicit_session.stderr)
+    );
+    let beta_via_explicit_session: serde_json::Value =
+        serde_json::from_slice(&beta_via_explicit_session.stdout).unwrap();
+    let labels_via_explicit: Vec<_> = beta_via_explicit_session["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels_via_explicit, vec!["beta-ws"]);
+
+    let human_sessions = run_named_cli(&config_home, &runtime_dir, &["session", "list"]);
+    assert!(human_sessions.status.success());
+    let human_sessions = String::from_utf8_lossy(&human_sessions.stdout);
+    assert!(human_sessions.contains("name"), "stdout: {human_sessions}");
+    assert!(
+        human_sessions.contains("status"),
+        "stdout: {human_sessions}"
+    );
+    assert!(human_sessions.contains("alpha"), "stdout: {human_sessions}");
+    assert!(
+        human_sessions.contains("running"),
+        "stdout: {human_sessions}"
+    );
+    assert!(
+        human_sessions.contains("/sessions/beta"),
+        "stdout: {human_sessions}"
+    );
+
+    let sessions = run_named_cli_json(&config_home, &runtime_dir, &["session", "list", "--json"]);
+    let sessions = sessions["sessions"].as_array().unwrap();
+    let default_session = sessions
+        .iter()
+        .find(|session| session["name"] == "default")
+        .unwrap();
+    let alpha_session = sessions
+        .iter()
+        .find(|session| session["name"] == "alpha")
+        .unwrap();
+    let beta_session = sessions
+        .iter()
+        .find(|session| session["name"] == "beta")
+        .unwrap();
+    assert_eq!(default_session["default"], true);
+    assert_eq!(default_session["running"], false);
+    assert_eq!(alpha_session["running"], true);
+    assert_eq!(beta_session["running"], true);
+    assert!(alpha_session["socket_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions/alpha/herdr.sock"));
+    assert!(beta_session["session_dir"]
+        .as_str()
+        .unwrap()
+        .ends_with("/sessions/beta"));
+
+    let delete_running = run_named_cli(&config_home, &runtime_dir, &["session", "delete", "alpha"]);
+    assert_eq!(delete_running.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&delete_running.stderr).contains("stop it before deleting"),
+        "stderr: {}",
+        String::from_utf8_lossy(&delete_running.stderr)
+    );
+
+    let delete_default = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["session", "delete", "default"],
+    );
+    assert_eq!(delete_default.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&delete_default.stderr).contains("default session"),
+        "stderr: {}",
+        String::from_utf8_lossy(&delete_default.stderr)
+    );
+
+    let stopped_alpha = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["session", "stop", "alpha", "--json"],
+    );
+    assert_eq!(stopped_alpha["stopped"], true);
+    assert_eq!(stopped_alpha["session"]["running"], false);
+
+    let deleted_alpha = run_named_cli_json(
+        &config_home,
+        &runtime_dir,
+        &["session", "delete", "alpha", "--json"],
+    );
+    assert_eq!(deleted_alpha["deleted"], true);
+    assert!(!config_home
+        .join(app_dir_name())
+        .join("sessions")
+        .join("alpha")
+        .exists());
+
+    let _ = run_named_cli(&config_home, &runtime_dir, &["session", "stop", "beta"]);
+    drop(alpha);
+    drop(beta);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn integration_commands_run_locally_when_server_is_missing() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -472,10 +827,10 @@ fn integration_commands_honor_socket_override_when_server_is_missing() {
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_install.status.code(), Some(1));
+    assert_eq!(integration_install.status.code(), Some(0));
     assert!(
-        !expected_extension.exists(),
-        "integration install should not run local install logic when socket is missing"
+        expected_extension.exists(),
+        "integration install should write local files without a server"
     );
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))
@@ -484,10 +839,110 @@ fn integration_commands_honor_socket_override_when_server_is_missing() {
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_uninstall.status.code(), Some(1));
+    assert_eq!(integration_uninstall.status.code(), Some(0));
     assert!(
         !expected_extension.exists(),
-        "integration uninstall should also be socket-backed when socket is missing"
+        "integration uninstall should remove local files without a server"
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn status_commands_report_client_and_server_versions() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let full = run_cli(&socket_path, &["status"]);
+    assert!(
+        full.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+    let full_stdout = String::from_utf8_lossy(&full.stdout);
+    assert!(full_stdout.contains("client:\n"), "stdout: {full_stdout}");
+    assert!(
+        full_stdout.contains(&format!("  version: {}", env!("CARGO_PKG_VERSION"))),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  protocol: 2"),
+        "stdout: {full_stdout}"
+    );
+    assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
+    assert!(
+        full_stdout.contains("  status: running"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  compatible: yes"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains("  restart_needed: no"),
+        "stdout: {full_stdout}"
+    );
+    assert!(
+        full_stdout.contains(&socket_path.display().to_string()),
+        "stdout: {full_stdout}"
+    );
+
+    let server = run_cli(&socket_path, &["status", "server"]);
+    assert!(server.status.success());
+    let server_stdout = String::from_utf8_lossy(&server.stdout);
+    assert!(
+        server_stdout.contains("status: running"),
+        "stdout: {server_stdout}"
+    );
+    assert!(
+        server_stdout.contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))),
+        "stdout: {server_stdout}"
+    );
+    assert!(
+        server_stdout.contains("protocol: 2"),
+        "stdout: {server_stdout}"
+    );
+
+    let client = run_cli(&socket_path, &["status", "client"]);
+    assert!(client.status.success());
+    let client_stdout = String::from_utf8_lossy(&client.stdout);
+    assert!(
+        client_stdout.contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))),
+        "stdout: {client_stdout}"
+    );
+    assert!(
+        client_stdout.contains("protocol: 2"),
+        "stdout: {client_stdout}"
+    );
+    assert!(
+        client_stdout.contains("binary: "),
+        "stdout: {client_stdout}"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn status_reports_not_running_when_server_socket_is_missing() {
+    let base = unique_test_dir();
+    let runtime_dir = base.join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    register_runtime_dir(&runtime_dir);
+    let socket_path = runtime_dir.join("missing.sock");
+
+    let status = run_cli(&socket_path, &["status"]);
+    assert!(status.status.success());
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("  status: not running"), "stdout: {stdout}");
+    assert!(stdout.contains("  restart_needed: no"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&socket_path.display().to_string()),
+        "stdout: {stdout}"
     );
 
     cleanup_test_base(&base);

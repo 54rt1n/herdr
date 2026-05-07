@@ -8,15 +8,22 @@ use crate::events::AppEvent;
 use crate::layout::{find_in_direction, NavDirection, PaneId};
 use crate::pane::EffectiveStateChange;
 
-use super::state::{AppState, Mode, ToastKind, ToastNotification};
+use super::state::{AppState, Mode, ToastKind, ToastNotification, ViewLayout};
 
 fn is_background_completion_transition(prev_state: AgentState, new_state: AgentState) -> bool {
     matches!(new_state, AgentState::Idle)
         && matches!(prev_state, AgentState::Working | AgentState::Blocked)
 }
 
-pub fn notification_sound_for_state_change(
+pub fn active_tab_suppresses_notifications(
     is_active_tab: bool,
+    outer_terminal_focus: Option<bool>,
+) -> bool {
+    is_active_tab && outer_terminal_focus != Some(false)
+}
+
+pub fn notification_sound_for_state_change(
+    suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
 ) -> Option<crate::sound::Sound> {
@@ -27,7 +34,8 @@ pub fn notification_sound_for_state_change(
     match new_state {
         AgentState::Blocked => Some(crate::sound::Sound::Request),
         AgentState::Idle
-            if is_background_completion_transition(prev_state, new_state) && !is_active_tab =>
+            if is_background_completion_transition(prev_state, new_state)
+                && !suppress_active_tab_notifications =>
         {
             Some(crate::sound::Sound::Done)
         }
@@ -36,11 +44,11 @@ pub fn notification_sound_for_state_change(
 }
 
 pub fn notification_toast_for_state_change(
-    is_active_tab: bool,
+    suppress_active_tab_notifications: bool,
     prev_state: AgentState,
     new_state: AgentState,
 ) -> Option<ToastKind> {
-    if is_active_tab || new_state == prev_state {
+    if suppress_active_tab_notifications || new_state == prev_state {
         return None;
     }
 
@@ -127,7 +135,16 @@ impl AppState {
     }
 
     pub(crate) fn ensure_workspace_visible(&mut self, idx: usize) {
-        if self.sidebar_collapsed || idx >= self.workspaces.len() {
+        if idx >= self.workspaces.len() {
+            return;
+        }
+
+        if self.view.layout == ViewLayout::Mobile && self.mode == Mode::Navigate {
+            self.ensure_mobile_workspace_visible(idx);
+            return;
+        }
+
+        if self.sidebar_collapsed {
             return;
         }
 
@@ -156,6 +173,25 @@ impl AppState {
         }
     }
 
+    fn ensure_mobile_workspace_visible(&mut self, idx: usize) {
+        let viewport = crate::ui::mobile_switcher_areas(self).viewport;
+        if viewport.height == 0 {
+            return;
+        }
+
+        let row_range = crate::ui::mobile_switcher_workspace_doc_range(idx);
+        let visible_start = self.mobile_switcher_scroll;
+        let visible_end = visible_start.saturating_add(viewport.height as usize);
+        if row_range.start < visible_start {
+            self.mobile_switcher_scroll = row_range.start;
+        } else if row_range.end > visible_end {
+            self.mobile_switcher_scroll = row_range.end.saturating_sub(viewport.height as usize);
+        }
+        self.mobile_switcher_scroll = self
+            .mobile_switcher_scroll
+            .min(crate::ui::mobile_switcher_max_scroll(self));
+    }
+
     pub fn switch_tab(&mut self, idx: usize) {
         if let Some(ws_idx) = self.active {
             let Some(ws) = self.workspaces.get_mut(ws_idx) else {
@@ -169,6 +205,28 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
+    }
+
+    pub(crate) fn mark_active_tab_seen(&mut self) -> bool {
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(tab) = self
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(crate::workspace::Workspace::active_tab_mut)
+        else {
+            return false;
+        };
+
+        let mut changed = false;
+        for pane in tab.panes.values_mut() {
+            if !pane.seen {
+                pane.seen = true;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn next_workspace(&mut self) {
@@ -573,6 +631,8 @@ impl AppState {
         change: &EffectiveStateChange,
     ) {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
+        let suppress_active_tab_notifications =
+            active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
         let Some(pane) = self.workspaces[ws_idx]
             .tabs
             .iter_mut()
@@ -581,15 +641,15 @@ impl AppState {
             return;
         };
 
-        if is_background_completion_transition(change.previous_state, change.state)
-            && !is_active_tab
-        {
-            pane.seen = false;
+        if change.state != AgentState::Idle {
+            pane.seen = true;
+        } else if is_background_completion_transition(change.previous_state, change.state) {
+            pane.seen = suppress_active_tab_notifications;
         }
 
         if self.local_sound_playback && self.sound.allows(change.known_agent) {
             if let Some(sound) = notification_sound_for_state_change(
-                is_active_tab,
+                suppress_active_tab_notifications,
                 change.previous_state,
                 change.state,
             ) {
@@ -715,10 +775,10 @@ mod tests {
     #[test]
     fn switch_workspace_keeps_selected_visible_in_scrolled_sidebar() {
         let mut state = app_with_workspaces(&["a", "b", "c", "d", "e", "f", "g", "h"]);
-        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 26, 14));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
 
         state.switch_workspace(7);
-        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 26, 14));
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
 
         assert!(state
             .view
@@ -904,6 +964,27 @@ mod tests {
     }
 
     #[test]
+    fn active_tab_completion_marks_pane_seen() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(true);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let pane = state.workspaces[0].panes.get_mut(&pane_id).unwrap();
+        pane.state = AgentState::Working;
+        pane.seen = false;
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+        });
+
+        let pane = state.workspaces[0].panes.get(&pane_id).unwrap();
+        assert_eq!(pane.state, AgentState::Idle);
+        assert!(pane.seen);
+    }
+
+    #[test]
     fn initial_idle_in_background_stays_seen() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.active = Some(0);
@@ -1063,6 +1144,31 @@ mod tests {
         });
 
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn active_workspace_active_tab_keeps_herdr_toast_suppressed_when_outer_terminal_is_unfocused() {
+        let mut state = app_with_workspaces(&["active"]);
+        state.active = Some(0);
+        state.outer_terminal_focus = Some(false);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+        });
+
+        assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn active_tab_suppression_preserves_unknown_focus_behavior() {
+        assert!(active_tab_suppresses_notifications(true, None));
+        assert!(active_tab_suppresses_notifications(true, Some(true)));
+        assert!(!active_tab_suppresses_notifications(true, Some(false)));
+        assert!(!active_tab_suppresses_notifications(false, None));
     }
 
     #[test]

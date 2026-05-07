@@ -77,6 +77,7 @@ pub struct App {
     pub render_notify: Arc<Notify>,
     pub render_dirty: Arc<AtomicBool>,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
+    pub(crate) local_terminal_notifications: bool,
 }
 
 pub(crate) enum LoopEvent {
@@ -112,6 +113,15 @@ fn repeat_key_identity(
 
 fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
+}
+
+fn agent_panel_scope_from_config(
+    scope: crate::config::AgentPanelScopeConfig,
+) -> state::AgentPanelScope {
+    match scope {
+        crate::config::AgentPanelScopeConfig::Current => state::AgentPanelScope::CurrentWorkspace,
+        crate::config::AgentPanelScopeConfig::All => state::AgentPanelScope::AllWorkspaces,
+    }
 }
 
 /// Resolve the palette from config: base theme + optional custom overrides.
@@ -173,7 +183,7 @@ impl App {
             workspaces,
             active,
             selected,
-            agent_panel_scope,
+            _restored_agent_panel_scope,
             sidebar_width,
             sidebar_width_source,
             sidebar_section_split,
@@ -242,6 +252,8 @@ impl App {
             )
         };
 
+        let agent_panel_scope = agent_panel_scope_from_config(config.ui.agent_panel_scope);
+
         info!(
             pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes,
             "using pane scrollback configuration"
@@ -293,7 +305,9 @@ impl App {
             agent_panel_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
+            mobile_switcher_scroll: 0,
             view: state::ViewState {
+                layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
@@ -302,6 +316,8 @@ impl App {
                 tab_scroll_right_hit_area: Rect::default(),
                 new_tab_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
+                mobile_header_rect: Rect::default(),
+                mobile_menu_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },
@@ -315,6 +331,7 @@ impl App {
             update_dismissed: false,
             config_diagnostic,
             toast: None,
+            outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
             default_sidebar_width: config.ui.sidebar_width,
@@ -395,6 +412,7 @@ impl App {
             render_notify,
             render_dirty,
             overlay_panes: HashMap::new(),
+            local_terminal_notifications: true,
         }
     }
 
@@ -628,6 +646,9 @@ impl App {
                 self.state.sidebar_width = config.ui.sidebar_width;
             }
             self.state.confirm_close = config.ui.confirm_close;
+            self.state.agent_panel_scope =
+                agent_panel_scope_from_config(config.ui.agent_panel_scope);
+            self.state.agent_panel_scroll = 0;
             self.state.accent = crate::config::parse_color(&config.ui.accent);
             if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                 self.state.request_client_sound_config_reload = true;
@@ -761,6 +782,8 @@ impl App {
                         }
                     }
                 }
+                crate::raw_input::RawInputEvent::OuterFocusGained
+                | crate::raw_input::RawInputEvent::OuterFocusLost => {}
                 crate::raw_input::RawInputEvent::HostDefaultColor { kind, color } => {
                     if apply_host_terminal_theme {
                         self.update_host_terminal_theme(kind, color);
@@ -779,7 +802,7 @@ impl App {
         let key_event = key.as_key_event();
         match self.state.mode {
             Mode::Navigate => {
-                input::handle_navigate_key(&mut self.state, key_event);
+                self.handle_navigate_key(key);
             }
             Mode::RenameWorkspace | Mode::RenameTab => {
                 input::handle_rename_key(&mut self.state, key_event);
@@ -883,6 +906,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_uses_configured_agent_panel_scope() {
+        let mut config = Config::default();
+        config.ui.agent_panel_scope = crate::config::AgentPanelScopeConfig::Current;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(
+            &config,
+            true,
+            None,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+    }
+
+    #[test]
     fn startup_restores_preview_update_available_from_saved_notes() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("startup-preview-update-available");
@@ -924,7 +968,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[keys]\nnew_workspace = \"g\"\nprefix = \"ctrl+a\"\n[ui]\nagent_panel_scope = \"current\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -942,6 +986,10 @@ mod tests {
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Herdr
+        );
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
         );
         assert!(app.state.config_diagnostic.is_none());
         let toast = app.state.toast.as_ref().unwrap();
@@ -1088,6 +1136,34 @@ mod tests {
     }
 
     #[test]
+    fn save_agent_panel_scope_persists_then_applies_live_config() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("save-agent-panel-scope");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "onboarding = false\n").unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::AllWorkspaces
+        );
+
+        app.save_agent_panel_scope(state::AgentPanelScope::CurrentWorkspace);
+
+        assert_eq!(
+            app.state.agent_panel_scope,
+            state::AgentPanelScope::CurrentWorkspace
+        );
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("agent_panel_scope = \"current\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_keeps_current_state_on_invalid_toml() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-invalid-toml");
@@ -1145,6 +1221,47 @@ mod tests {
             .await;
 
         assert!(handled);
+    }
+
+    #[tokio::test]
+    async fn outer_focus_gained_marks_visible_done_panes_seen() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        let split_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let background_tab = workspace.test_add_tab(Some("background"));
+        let background_pane = workspace.tabs[background_tab].root_pane;
+
+        workspace.tabs[0].panes.get_mut(&root_pane).unwrap().state = AgentState::Idle;
+        workspace.tabs[0].panes.get_mut(&root_pane).unwrap().seen = false;
+        workspace.tabs[0].panes.get_mut(&split_pane).unwrap().state = AgentState::Idle;
+        workspace.tabs[0].panes.get_mut(&split_pane).unwrap().seen = false;
+        workspace.tabs[background_tab]
+            .panes
+            .get_mut(&background_pane)
+            .unwrap()
+            .state = AgentState::Idle;
+        workspace.tabs[background_tab]
+            .panes
+            .get_mut(&background_pane)
+            .unwrap()
+            .seen = false;
+
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.outer_terminal_focus = Some(false);
+
+        let handled = app
+            .handle_raw_input_event(crate::raw_input::RawInputEvent::OuterFocusGained)
+            .await;
+
+        assert!(handled);
+        assert_eq!(app.state.outer_terminal_focus, Some(true));
+        assert!(app.state.workspaces[0].tabs[0].panes[&root_pane].seen);
+        assert!(app.state.workspaces[0].tabs[0].panes[&split_pane].seen);
+        assert!(!app.state.workspaces[0].tabs[background_tab].panes[&background_pane].seen);
     }
 
     #[tokio::test]
@@ -1578,6 +1695,28 @@ mod tests {
             Mode::Terminal,
             "q should leave navigate mode"
         );
+    }
+
+    #[tokio::test]
+    async fn route_client_input_double_prefix_passes_prefix_through_to_focused_pane() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().unwrap();
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prefix_code = KeyCode::Char('l');
+        app.state.prefix_mods = KeyModifiers::CONTROL;
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(app.state.mode, Mode::Navigate);
+
+        app.route_client_input(vec![0x0c]);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(rx.recv().await.unwrap(), bytes::Bytes::from(vec![0x0c]));
     }
 
     #[tokio::test]

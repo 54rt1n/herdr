@@ -22,8 +22,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use tracing::{debug, info, warn};
@@ -41,6 +42,9 @@ use crate::server::protocol::{
 struct ClientState {
     /// The last frame we rendered, used for diff-based blitting.
     last_frame: Option<FrameData>,
+    /// Last visible cursor exported by the focused pane, used as the hidden
+    /// cursor parking position when the pane temporarily hides its cursor.
+    last_visible_cursor: Option<(u16, u16)>,
     /// The terminal size we reported to the server in our last Hello/Resize.
     reported_size: (u16, u16),
     /// Client-local sound playback config, refreshed on server request.
@@ -136,6 +140,7 @@ fn setup_terminal() -> io::Result<TerminalGuard> {
         io::stdout(),
         EnableMouseCapture,
         EnableBracketedPaste,
+        EnableFocusChange,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -175,6 +180,7 @@ fn restore_terminal_state(in_tmux: bool) {
     let _ = execute!(
         io::stdout(),
         PopKeyboardEnhancementFlags,
+        DisableFocusChange,
         DisableBracketedPaste,
         DisableMouseCapture
     );
@@ -356,6 +362,7 @@ async fn run_client_loop(
 ) -> Result<(), ClientError> {
     let mut state = ClientState {
         last_frame: None,
+        last_visible_cursor: None,
         reported_size: (cols, rows),
         sound_config,
     };
@@ -421,7 +428,11 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    blit::blit_frame(&frame_data, state.last_frame.as_ref());
+                    blit::blit_frame_with_cursor_memory(
+                        &frame_data,
+                        state.last_frame.as_ref(),
+                        &mut state.last_visible_cursor,
+                    );
                     state.last_frame = Some(frame_data);
                     let _ = io::stdout().flush();
                 }

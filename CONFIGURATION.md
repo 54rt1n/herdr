@@ -6,6 +6,15 @@ herdr reads config from:
 ~/.config/herdr/config.toml
 ```
 
+Named sessions share this config file. Sessions are runtime/socket namespaces, not workspace replacements; per-session sockets and persistent runtime state are separate:
+
+```text
+~/.config/herdr/session.json
+~/.config/herdr/sessions/<name>/session.json
+```
+
+Use `herdr session list`, `herdr session attach <name>`, `herdr session stop <name>`, and `herdr session delete <name>` to inspect and manage named session namespaces. Add `--json` to session commands when scripts need machine-readable output.
+
 print the full default config with:
 
 ```bash
@@ -30,6 +39,7 @@ Reloadable now:
 - keybindings and prefix
 - theme, custom theme colors, and legacy `ui.accent`
 - `ui.confirm_close`
+- `ui.agent_panel_scope`
 - `ui.toast.delivery`
 - server-side `ui.sound` policy; attached thin clients refresh local sound config after a successful sound-policy change
 - `advanced.scrollback_limit_bytes` for panes created after reload
@@ -131,7 +141,7 @@ focus_pane_right = "alt+l"
 
 ## theme
 
-herdr ships with 9 built-in color themes. set one in config:
+herdr ships with 10 built-in color themes. set one in config:
 
 ```toml
 [theme]
@@ -151,6 +161,7 @@ name = "tokyo-night"
 | `solarized` | ethan schoonover's classic |
 | `kanagawa` | hokusai-inspired |
 | `rose-pine` | muted, elegant |
+| `vesper` | high-contrast monochrome with peach and mint accents |
 
 theme names are flexible: `tokyo-night`, `tokyonight`, and `tokyo_night` all work.
 
@@ -202,6 +213,7 @@ for `panel_bg`, you can also use `reset`, `default`, `none`, or `transparent` to
 [ui]
 sidebar_width = 26
 confirm_close = true
+agent_panel_scope = "all"
 accent = "cyan"
 ```
 
@@ -211,7 +223,10 @@ accent = "cyan"
 |--------|---------|-------------|
 | `sidebar_width` | `26` | base sidebar width before auto-scaling |
 | `confirm_close` | `true` | ask before closing a workspace |
+| `agent_panel_scope` | `all` | sidebar agent list scope: `current` or `all` |
 | `accent` | `cyan` | highlight and border color |
+
+Changing the agent panel scope from the sidebar writes `agent_panel_scope` to config so it survives session resets and upgrades.
 
 `accent` accepts:
 - named colors like `cyan`, `blue`, `magenta`
