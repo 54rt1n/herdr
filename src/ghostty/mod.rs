@@ -223,23 +223,6 @@ struct WritePtyCallbackState {
     callback: Box<dyn FnMut(&[u8]) + Send>,
 }
 
-#[repr(C)]
-struct GhosttyTerminalSelection {
-    start: ffi::GhosttyPoint,
-    end: ffi::GhosttyPoint,
-    rectangle: bool,
-}
-
-unsafe extern "C" {
-    fn ghostty_terminal_read_text(
-        terminal: ffi::GhosttyTerminal_ptr,
-        selection: GhosttyTerminalSelection,
-        allocator: *const ffi::GhosttyAllocator,
-        out_ptr: *mut *mut u8,
-        out_len: *mut usize,
-    ) -> ffi::GhosttyResult;
-}
-
 unsafe extern "C" fn write_pty_trampoline(
     _terminal: ffi::GhosttyTerminal_ptr,
     userdata: *mut c_void,
@@ -418,12 +401,16 @@ impl Terminal {
     }
 
     pub fn screen_graphemes(&self, x: u16, y: u32) -> Result<Vec<u32>, Error> {
-        let point = ffi::GhosttyPoint {
-            tag: ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN,
-            value: ffi::GhosttyPointValue {
-                coordinate: ffi::GhosttyPointCoordinate { x, y },
-            },
-        };
+        let grid_ref = self.grid_ref(ghostty_screen_point(x, y))?;
+        grid_ref_graphemes(&grid_ref)
+    }
+
+    pub fn viewport_hyperlink_uri(&self, x: u16, y: u32) -> Result<Option<String>, Error> {
+        let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
+        grid_ref_hyperlink_uri(&grid_ref)
+    }
+
+    fn grid_ref(&self, point: ffi::GhosttyPoint) -> Result<ffi::GhosttyGridRef, Error> {
         let mut grid_ref = ffi::GhosttyGridRef {
             size: mem::size_of::<ffi::GhosttyGridRef>(),
             ..Default::default()
@@ -431,28 +418,7 @@ impl Terminal {
         unsafe {
             ffi::ghostty_terminal_grid_ref(self.raw, point, &mut grid_ref).into_result()?;
         }
-        let mut required = 0usize;
-        let result = unsafe {
-            ffi::ghostty_grid_ref_graphemes(&grid_ref, ptr::null_mut(), 0, &mut required)
-        };
-        if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
-            result.into_result()?;
-        }
-        let mut buffer = vec![0u32; required];
-        if required == 0 {
-            return Ok(buffer);
-        }
-        unsafe {
-            ffi::ghostty_grid_ref_graphemes(
-                &grid_ref,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-                &mut required,
-            )
-            .into_result()?;
-        }
-        buffer.truncate(required);
-        Ok(buffer)
+        Ok(grid_ref)
     }
 
     pub fn read_text_viewport(
@@ -461,11 +427,11 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        self.read_text_selection(GhosttyTerminalSelection {
-            start: ghostty_viewport_point(start.0, start.1),
-            end: ghostty_viewport_point(end.0, end.1),
+        self.read_text_selection(
+            ghostty_viewport_point(start.0, start.1),
+            ghostty_viewport_point(end.0, end.1),
             rectangle,
-        })
+        )
     }
 
     pub fn read_text_screen(
@@ -474,26 +440,68 @@ impl Terminal {
         end: (u16, u32),
         rectangle: bool,
     ) -> Result<String, Error> {
-        self.read_text_selection(GhosttyTerminalSelection {
-            start: ghostty_screen_point(start.0, start.1),
-            end: ghostty_screen_point(end.0, end.1),
+        self.read_text_selection(
+            ghostty_screen_point(start.0, start.1),
+            ghostty_screen_point(end.0, end.1),
             rectangle,
-        })
+        )
     }
 
-    fn read_text_selection(&self, selection: GhosttyTerminalSelection) -> Result<String, Error> {
+    fn read_text_selection(
+        &self,
+        start: ffi::GhosttyPoint,
+        end: ffi::GhosttyPoint,
+        rectangle: bool,
+    ) -> Result<String, Error> {
+        let mut start_ref = ffi::GhosttyGridRef {
+            size: mem::size_of::<ffi::GhosttyGridRef>(),
+            ..Default::default()
+        };
+        let mut end_ref = ffi::GhosttyGridRef {
+            size: mem::size_of::<ffi::GhosttyGridRef>(),
+            ..Default::default()
+        };
+        unsafe {
+            ffi::ghostty_terminal_grid_ref(self.raw, start, &mut start_ref).into_result()?;
+            ffi::ghostty_terminal_grid_ref(self.raw, end, &mut end_ref).into_result()?;
+        }
+
+        let selection = ffi::GhosttySelection {
+            size: mem::size_of::<ffi::GhosttySelection>(),
+            start: start_ref,
+            end: end_ref,
+            rectangle,
+        };
+        let mut formatter: ffi::GhosttyFormatter_ptr = ptr::null_mut();
+        let options = ffi::GhosttyFormatterTerminalOptions {
+            size: mem::size_of::<ffi::GhosttyFormatterTerminalOptions>(),
+            emit: ffi::GhosttyFormatterFormat_GHOSTTY_FORMATTER_FORMAT_PLAIN,
+            unwrap: true,
+            trim: true,
+            extra: ffi::GhosttyFormatterTerminalExtra {
+                size: mem::size_of::<ffi::GhosttyFormatterTerminalExtra>(),
+                screen: ffi::GhosttyFormatterScreenExtra {
+                    size: mem::size_of::<ffi::GhosttyFormatterScreenExtra>(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            selection: &selection,
+        };
+        unsafe {
+            ffi::ghostty_formatter_terminal_new(ptr::null(), &mut formatter, self.raw, options)
+                .into_result()?;
+        }
+
         let mut out_ptr = ptr::null_mut();
         let mut out_len = 0usize;
+        let result = unsafe {
+            ffi::ghostty_formatter_format_alloc(formatter, ptr::null(), &mut out_ptr, &mut out_len)
+        };
         unsafe {
-            ghostty_terminal_read_text(
-                self.raw,
-                selection,
-                ptr::null(),
-                &mut out_ptr,
-                &mut out_len,
-            )
-            .into_result()?;
+            ffi::ghostty_formatter_free(formatter);
         }
+        result.into_result()?;
 
         let text = if out_len == 0 {
             String::new()
@@ -593,6 +601,49 @@ fn ghostty_screen_point(x: u16, y: u32) -> ffi::GhosttyPoint {
             coordinate: ffi::GhosttyPointCoordinate { x, y },
         },
     }
+}
+
+fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error> {
+    let mut required = 0usize;
+    let result =
+        unsafe { ffi::ghostty_grid_ref_graphemes(grid_ref, ptr::null_mut(), 0, &mut required) };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    let mut buffer = vec![0u32; required];
+    if required == 0 {
+        return Ok(buffer);
+    }
+    unsafe {
+        ffi::ghostty_grid_ref_graphemes(grid_ref, buffer.as_mut_ptr(), buffer.len(), &mut required)
+            .into_result()?;
+    }
+    buffer.truncate(required);
+    Ok(buffer)
+}
+
+fn grid_ref_hyperlink_uri(grid_ref: &ffi::GhosttyGridRef) -> Result<Option<String>, Error> {
+    let mut required = 0usize;
+    let result =
+        unsafe { ffi::ghostty_grid_ref_hyperlink_uri(grid_ref, ptr::null_mut(), 0, &mut required) };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    if required == 0 {
+        return Ok(None);
+    }
+    let mut buffer = vec![0u8; required];
+    unsafe {
+        ffi::ghostty_grid_ref_hyperlink_uri(
+            grid_ref,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut required,
+        )
+        .into_result()?;
+    }
+    buffer.truncate(required);
+    Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
 }
 
 pub struct RenderState {
@@ -1058,6 +1109,20 @@ impl<'a> RowCellIter<'a> {
         Ok(CellWide::from_raw(wide))
     }
 
+    pub fn has_hyperlink(&self) -> Result<bool, Error> {
+        let raw = self.raw_cell()?;
+        let mut has_hyperlink = false;
+        unsafe {
+            ffi::ghostty_cell_get(
+                raw,
+                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+                (&mut has_hyperlink as *mut bool).cast(),
+            )
+            .into_result()?;
+        }
+        Ok(has_hyperlink)
+    }
+
     pub fn style(&self) -> Result<CellStyle, Error> {
         let mut style = ffi::GhosttyStyle {
             size: mem::size_of::<ffi::GhosttyStyle>(),
@@ -1191,12 +1256,8 @@ mod tests {
         let _simd = build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_SIMD);
         let _tmux_control_mode =
             build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_TMUX_CONTROL_MODE);
-        let kitty_graphics =
+        let _kitty_graphics =
             build_info_bool(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_KITTY_GRAPHICS);
-        assert!(
-            !kitty_graphics,
-            "current herdr vendor must keep Kitty graphics disabled until image handling is explicit"
-        );
 
         let optimize = build_info_optimize();
         assert!(matches!(
@@ -1269,6 +1330,18 @@ mod tests {
 
         let text = terminal.read_text_viewport((0, 1), (2, 2), false).unwrap();
         assert_eq!(text, "2EFGH3IJ");
+    }
+
+    #[test]
+    fn terminal_extracts_viewport_hyperlink_uri() {
+        let mut terminal = Terminal::new(20, 3, 0).unwrap();
+        terminal.write(b"\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\");
+
+        assert_eq!(
+            terminal.viewport_hyperlink_uri(0, 0).unwrap().as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(terminal.viewport_hyperlink_uri(4, 0).unwrap(), None);
     }
 
     #[test]

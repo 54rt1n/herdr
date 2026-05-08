@@ -31,6 +31,7 @@ pub enum Agent {
     Droid,
     Amp,
     Hermes,
+    Devin,
 }
 
 pub fn agent_label(agent: Agent) -> &'static str {
@@ -47,6 +48,7 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Droid => "droid",
         Agent::Amp => "amp",
         Agent::Hermes => "hermes",
+        Agent::Devin => "devin",
     }
 }
 
@@ -65,6 +67,7 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
         "hermes" => Some(Agent::Hermes),
+        "devin" => Some(Agent::Devin),
         _ => None,
     }
 }
@@ -87,6 +90,7 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
         "droid" => Some(Agent::Droid),
         "amp" | "amp-local" => Some(Agent::Amp),
         "hermes" => Some(Agent::Hermes),
+        "devin" => Some(Agent::Devin),
         _ => None,
     }
 }
@@ -129,6 +133,7 @@ pub fn detect_state(agent: Option<Agent>, screen_content: &str) -> AgentState {
         Agent::Droid => detect_droid(screen_content),
         Agent::Amp => detect_amp(screen_content),
         Agent::Hermes => detect_hermes(screen_content),
+        Agent::Devin => detect_devin(screen_content),
     }
 }
 
@@ -452,6 +457,53 @@ fn detect_hermes(content: &str) -> AgentState {
     }
 
     AgentState::Unknown
+}
+
+/// Devin detection.
+///
+/// Devin shows tool calls and processing indicators when working.
+/// Blocked states occur when waiting for user input or confirmation.
+/// Idle state is when waiting for the next user message.
+fn detect_devin(content: &str) -> AgentState {
+    let lower = content.to_lowercase();
+
+    // Blocked: confirmation prompts, yes/no questions, user input required
+    if lower.contains("allow?")
+        || lower.contains("confirm?")
+        || lower.contains("proceed?")
+        || lower.contains("approve?")
+        || lower.contains("[y/n]")
+        || lower.contains("(y/n)")
+        || lower.contains("yes (y)")
+        || lower.contains("no (n)")
+    {
+        return AgentState::Blocked;
+    }
+
+    // Blocked: generic confirmation patterns
+    if has_confirmation_prompt(&lower) {
+        return AgentState::Blocked;
+    }
+
+    // Working: tool execution, processing indicators
+    if lower.contains("processing")
+        || lower.contains("thinking")
+        || lower.contains("working")
+        || lower.contains("executing")
+        || lower.contains("running")
+        || lower.contains("ctrl+c to interrupt")
+        || lower.contains("ctrl-c to interrupt")
+        || lower.contains("esc to interrupt")
+    {
+        return AgentState::Working;
+    }
+
+    // Working: spinner characters or activity indicators
+    if has_spinner_activity(content) || has_braille_spinner(content) {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
 }
 
 /// Check for braille spinner characters at the start of a line.

@@ -318,6 +318,7 @@ impl App {
                 terminal_area: Rect::default(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
+                toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
             },
@@ -684,6 +685,7 @@ impl App {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
                     title: "reloaded config".to_string(),
                     context: "using config.toml".to_string(),
+                    target: None,
                 });
             }
         } else {
@@ -694,6 +696,7 @@ impl App {
                     kind: crate::app::state::ToastKind::UpdateInstalled,
                     title: "reloaded config".to_string(),
                     context: "with warnings".to_string(),
+                    target: None,
                 });
             }
         }
@@ -1431,6 +1434,127 @@ mod tests {
 
         assert_eq!(response["result"]["type"], "ok");
         assert!(app.state.should_quit);
+    }
+
+    #[tokio::test]
+    async fn pane_split_request_targets_pane_in_background_tab() {
+        let _guard = config_env_lock().lock().unwrap();
+        let original_shell = std::env::var_os("SHELL");
+        std::env::set_var("SHELL", "/usr/bin/true");
+
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-pane-split-background-tab");
+        let active_pane = workspace.tabs[0].root_pane;
+        let background_tab = workspace.test_add_tab(Some("worker"));
+        let target_pane = workspace.tabs[background_tab].root_pane;
+        workspace.switch_tab(background_tab);
+        let background_previous_focus =
+            workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.switch_tab(0);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let target_pane_id = app.pane_info(0, target_pane).unwrap().pane_id;
+        let target_tab_id = app.public_tab_id(0, background_tab).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_split_background_tab".into(),
+            method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id,
+                direction: crate::api::schema::SplitDirection::Right,
+                cwd: None,
+                focus: false,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert_eq!(response["result"]["pane"]["tab_id"], target_tab_id);
+        assert_eq!(response["result"]["pane"]["focused"], false);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            active_pane
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert_eq!(
+            app.state.workspaces[0].tabs[background_tab]
+                .layout
+                .focused(),
+            background_previous_focus
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[background_tab]
+                .layout
+                .pane_count(),
+            3
+        );
+
+        let runtimes: Vec<_> = app.state.workspaces[0]
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| tab.runtimes.drain())
+            .collect();
+        for (pane_id, runtime) in runtimes {
+            runtime.shutdown(pane_id);
+        }
+        match original_shell {
+            Some(value) => std::env::set_var("SHELL", value),
+            None => std::env::remove_var("SHELL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pane_split_request_focuses_new_pane_when_requested() {
+        let _guard = config_env_lock().lock().unwrap();
+        let original_shell = std::env::var_os("SHELL");
+        std::env::set_var("SHELL", "/usr/bin/true");
+
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("api-pane-split-focus-background-tab");
+        let background_tab = workspace.test_add_tab(Some("worker"));
+        workspace.switch_tab(0);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let target_pane = app.state.workspaces[0].tabs[background_tab].root_pane;
+        let target_pane_id = app.pane_info(0, target_pane).unwrap().pane_id;
+        let target_tab_id = app.public_tab_id(0, background_tab).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_pane_split_focus_background_tab".into(),
+            method: crate::api::schema::Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id,
+                direction: crate::api::schema::SplitDirection::Right,
+                cwd: None,
+                focus: true,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_info");
+        assert_eq!(response["result"]["pane"]["tab_id"], target_tab_id);
+        assert_eq!(response["result"]["pane"]["focused"], true);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(app.state.workspaces[0].active_tab, background_tab);
+
+        let runtimes: Vec<_> = app.state.workspaces[0]
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| tab.runtimes.drain())
+            .collect();
+        for (pane_id, runtime) in runtimes {
+            runtime.shutdown(pane_id);
+        }
+        match original_shell {
+            Some(value) => std::env::set_var("SHELL", value),
+            None => std::env::remove_var("SHELL"),
+        }
     }
 
     #[test]

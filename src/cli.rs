@@ -477,7 +477,7 @@ fn workspace_list(args: &[String]) -> std::io::Result<i32> {
 
 fn workspace_create(args: &[String]) -> std::io::Result<i32> {
     let mut cwd = None;
-    let mut focus = true;
+    let mut focus = false;
     let mut label = None;
 
     let mut index = 0;
@@ -498,6 +498,10 @@ fn workspace_create(args: &[String]) -> std::io::Result<i32> {
                 };
                 label = Some(value.clone());
                 index += 2;
+            }
+            "--focus" => {
+                focus = true;
+                index += 1;
             }
             "--no-focus" => {
                 focus = false;
@@ -615,7 +619,7 @@ fn tab_list(args: &[String]) -> std::io::Result<i32> {
 fn tab_create(args: &[String]) -> std::io::Result<i32> {
     let mut workspace_id = None;
     let mut cwd = None;
-    let mut focus = true;
+    let mut focus = false;
     let mut label = None;
 
     let mut index = 0;
@@ -644,6 +648,10 @@ fn tab_create(args: &[String]) -> std::io::Result<i32> {
                 };
                 label = Some(value.clone());
                 index += 2;
+            }
+            "--focus" => {
+                focus = true;
+                index += 1;
             }
             "--no-focus" => {
                 focus = false;
@@ -952,7 +960,7 @@ fn pane_targeted_read(args: &[String]) -> std::io::Result<i32> {
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!(
-            "usage: herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]"
+            "usage: herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"
         );
         return Ok(2);
     };
@@ -960,7 +968,7 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
     let pane_id = normalize_pane_id(raw_pane_id);
     let mut direction = None;
     let mut cwd = None;
-    let mut focus = true;
+    let mut focus = false;
 
     let mut index = 1;
     while index < args.len() {
@@ -980,6 +988,10 @@ fn pane_split(args: &[String]) -> std::io::Result<i32> {
                 };
                 cwd = Some(value.clone());
                 index += 2;
+            }
+            "--focus" => {
+                focus = true;
+                index += 1;
             }
             "--no-focus" => {
                 focus = false;
@@ -1518,7 +1530,7 @@ fn print_status_help() {
 fn print_workspace_help() {
     eprintln!("herdr workspace commands:");
     eprintln!("  herdr workspace list");
-    eprintln!("  herdr workspace create [--cwd PATH] [--label TEXT] [--no-focus]");
+    eprintln!("  herdr workspace create [--cwd PATH] [--label TEXT] [--focus] [--no-focus]");
     eprintln!("  herdr workspace get <workspace_id>");
     eprintln!("  herdr workspace focus <workspace_id>");
     eprintln!("  herdr workspace rename <workspace_id> <label>");
@@ -1529,7 +1541,7 @@ fn print_tab_help() {
     eprintln!("herdr tab commands:");
     eprintln!("  herdr tab list [--workspace <workspace_id>]");
     eprintln!(
-        "  herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--no-focus]"
+        "  herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--focus] [--no-focus]"
     );
     eprintln!("  herdr tab get <tab_id>");
     eprintln!("  herdr tab focus <tab_id>");
@@ -1543,7 +1555,9 @@ fn print_pane_help() {
     eprintln!("  herdr pane get <pane_id>");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--raw]");
     eprintln!("  herdr pane targeted-read <pane_id> --left N|--right N|--width N --top N|--bottom N|--height N [--source visible|recent|recent-unwrapped] [--lines N] [--raw] [--trim]");
-    eprintln!("  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--no-focus]");
+    eprintln!(
+        "  herdr pane split <pane_id> --direction right|down [--cwd PATH] [--focus] [--no-focus]"
+    );
     eprintln!("  herdr pane close <pane_id>");
     eprintln!("  herdr pane send-text <pane_id> <text>");
     eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
