@@ -2,6 +2,7 @@ use crate::detect::{Agent, AgentState};
 
 const CLAUDE_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 const HERMES_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+const DEVIN_WORKING_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
@@ -182,6 +183,7 @@ pub(crate) fn stabilize_agent_state(
     let hold = match agent {
         Some(Agent::Claude) => Some(CLAUDE_WORKING_HOLD),
         Some(Agent::Hermes) => Some(HERMES_WORKING_HOLD),
+        Some(Agent::Devin) => Some(DEVIN_WORKING_HOLD),
         _ => None,
     };
     let Some(hold) = hold else {
@@ -345,6 +347,25 @@ mod tests {
         );
 
         assert_eq!(idle, AgentState::Idle);
+    }
+
+    #[test]
+    fn devin_stays_working_while_screen_changes_after_spinner() {
+        let now = std::time::Instant::now();
+        let mut last_working = Some(now);
+        let changed_at = now + DEVIN_WORKING_HOLD + std::time::Duration::from_millis(1);
+
+        let state = stabilize_agent_state(
+            Some(Agent::Devin),
+            AgentState::Working,
+            AgentState::Idle,
+            changed_at,
+            &mut last_working,
+            true,
+        );
+
+        assert_eq!(state, AgentState::Working);
+        assert_eq!(last_working, Some(changed_at));
     }
 
     #[test]

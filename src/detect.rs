@@ -467,35 +467,9 @@ fn detect_hermes(content: &str) -> AgentState {
 fn detect_devin(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Blocked: confirmation prompts, yes/no questions, user input required
-    if lower.contains("allow?")
-        || lower.contains("confirm?")
-        || lower.contains("proceed?")
-        || lower.contains("approve?")
-        || lower.contains("[y/n]")
-        || lower.contains("(y/n)")
-        || lower.contains("yes (y)")
-        || lower.contains("no (n)")
-    {
-        return AgentState::Blocked;
-    }
-
     // Blocked: generic confirmation patterns
     if has_confirmation_prompt(&lower) {
         return AgentState::Blocked;
-    }
-
-    // Working: tool execution, processing indicators
-    if lower.contains("processing")
-        || lower.contains("thinking")
-        || lower.contains("working")
-        || lower.contains("executing")
-        || lower.contains("running")
-        || lower.contains("ctrl+c to interrupt")
-        || lower.contains("ctrl-c to interrupt")
-        || lower.contains("esc to interrupt")
-    {
-        return AgentState::Working;
     }
 
     // Working: spinner characters or activity indicators
@@ -506,15 +480,25 @@ fn detect_devin(content: &str) -> AgentState {
     AgentState::Idle
 }
 
-/// Check for braille spinner characters at the start of a line.
-/// These are the Unicode braille pattern dots used by CLI spinners.
+/// Check for a single visible braille spinner character at the start of a line.
+/// U+2800 is used as spacing; multiple visible braille glyphs indicate splash/art content.
 fn has_braille_spinner(content: &str) -> bool {
     for line in content.lines() {
         let trimmed = line.trim();
-        if let Some(c) = trimmed.chars().next() {
-            if ('\u{2800}'..='\u{28FF}').contains(&c) {
-                return true;
+        let mut braille_count = 0;
+        for c in trimmed.chars() {
+            if ('\u{2801}'..='\u{28FF}').contains(&c) {
+                braille_count += 1;
             }
+        }
+
+        if braille_count == 1
+            && trimmed
+                .chars()
+                .next()
+                .is_some_and(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
+        {
+            return true;
         }
     }
     false
@@ -1452,6 +1436,7 @@ mod tests {
         assert!(has_braille_spinner("⠴ Thinking..."));
         assert!(has_braille_spinner("  ⠧ Loading..."));
         assert!(has_braille_spinner("text\n⠋ Working\nmore"));
+        assert!(has_braille_spinner("⠋⠀ Running tools"));
     }
 
     #[test]
@@ -1459,6 +1444,7 @@ mod tests {
         assert!(!has_braille_spinner("normal text"));
         assert!(!has_braille_spinner("Thinking..."));
         assert!(!has_braille_spinner("some ⠴ in middle of text"));
+        assert!(!has_braille_spinner("⠋⠙ Thinking..."));
     }
 
     #[test]
@@ -1496,6 +1482,21 @@ mod tests {
     fn amp_working_running_tools() {
         let screen = "  ✓ Search Map the core runtime architecture\n  ⋯ Oracle ▼\n  ≈ Running tools...         Esc to cancel";
         assert_eq!(detect_state(Some(Agent::Amp), screen), AgentState::Working);
+    }
+
+    #[test]
+    fn devin_idle_on_home_screen_splash() {
+        let screen = "$ devin\n⠀⠀⠀⠀⠀⣴⣾⣶⡄⠀⠀⠀⠀\n⠀⣴⣾⣶⡾⠛⠿⠟⠃⣴⣾⣶⡄  Devin for Terminal\n⠀⠛⠿⠟⠃⣴⣾⣶⡾⠛⠿⠟⠃  v2026.5.6-1\n⠀⣤⣶⣦⡄⠻⢿⠿⢷⣤⣶⣦⡄\n⠀⠻⢿⠿⢷⣤⣶⣦⡄⠻⢿⠿⠃  Free plan, use /upgrade to access better models · 74% remaining (resets in 12h 13m)\n⠀⠀⠀⠀⠀⠻⢿⠿⠃⠀⠀⠀⠀\n\n❭ Ask Devin to build features, fix bugs, or work on your code\nSWE-1.6 Fast                                                                                                   Looking for plan mode? /plan";
+        assert_eq!(detect_state(Some(Agent::Devin), screen), AgentState::Idle);
+    }
+
+    #[test]
+    fn devin_working_when_braille_spinner_and_interrupt_are_visible() {
+        let screen = "⠋ Thinking through the code changes\nEsc to interrupt";
+        assert_eq!(
+            detect_state(Some(Agent::Devin), screen),
+            AgentState::Working
+        );
     }
 
     #[test]
